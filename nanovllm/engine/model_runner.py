@@ -20,7 +20,7 @@ class ModelRunner:
         self.block_size = config.kvcache_block_size
         self.enforce_eager = config.enforce_eager
         self.world_size = config.tensor_parallel_size
-        self.rank = rank
+        self.rank = rank #process rank
         self.event = event
 
         dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
@@ -28,11 +28,11 @@ class ModelRunner:
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.torch_dtype)
         torch.set_default_device("cuda")
-        self.model = Qwen3ForCausalLM(hf_config)
-        load_model(self.model, config.model)
+        self.model = Qwen3ForCausalLM(hf_config) # 初始化模型结构
+        load_model(self.model, config.model) #load 模型参数
         self.sampler = Sampler()
-        self.warmup_model()
-        self.allocate_kv_cache()
+        self.warmup_model() # 预跑一下模型， 预估得到kv的内存空间
+        self.allocate_kv_cache() # 里面会实际在GPU上分配内存
         if not self.enforce_eager:
             self.capture_cudagraph()
         torch.set_default_device("cpu")
@@ -134,10 +134,18 @@ class ModelRunner:
         block_tables = None
         for seq in seqs:
             seqlen = len(seq)
+            # extend 将一个可迭代对象（如另一个列表、元组或字符串）中的所有元素逐个添加到当前列表的末尾。
+            # example
+            # fruits = ['apple', 'banana']
+            # more_fruits = ['cherry', 'orange']
+            # fruits.extend(more_fruits)
+            # print(fruits) 
+            # # 输出: ['apple', 'banana', 'cherry', 'orange']
             input_ids.extend(seq[seq.num_cached_tokens:])
             positions.extend(list(range(seq.num_cached_tokens, seqlen)))
             seqlen_q = seqlen - seq.num_cached_tokens
             seqlen_k = seqlen
+            # 相当于push了一个(cu_seqlens_q.back() + seqlen_q)
             cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
             max_seqlen_q = max(seqlen_q, max_seqlen_q)
@@ -188,9 +196,10 @@ class ModelRunner:
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
-        if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
+        if is_prefill or self.enforce_eager or input_ids.size(0) > 512: # prefill
+            #把模型输出的hidden stats 再 经过一层得到特征向量
             return self.model.compute_logits(self.model(input_ids, positions))
-        else:
+        else: #decode
             bs = input_ids.size(0)
             context = get_context()
             graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
@@ -205,11 +214,11 @@ class ModelRunner:
             graph.replay()
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
-    def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
+    def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]: #从调度到模型真正执行
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
-        logits = self.run_model(input_ids, positions, is_prefill)
-        token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
+        logits = self.run_model(input_ids, positions, is_prefill) #概率分布
+        token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None # 概率分布传到采样器去 得到next token
         reset_context()
         return token_ids
 
@@ -249,3 +258,43 @@ class ModelRunner:
             block_tables=block_tables,
             outputs=outputs,
         )
+
+"""
+pin_memory=True (锁页内存)
+这是性能优化的第一步。
+
+普通内存（Pageable Memory）：默认情况下，CPU 内存是可分页的，操作系统可能会将其交换到磁盘。GPU 无法直接访问这种内存。
+
+锁页内存（Pinned Memory）：设置 pin_memory=True 会在 CPU 内存中申请一块固定区域，不会被交换到磁盘。
+
+优势：GPU 可以通过 DMA（直接内存访问） 技术直接从这块内存读取数据，跳过 CPU 的干预，传输速度大幅提升。
+
+.cuda(non_blocking=True) (异步传输)
+这是性能优化的第二步。
+
+同步（Default）：CPU 发起拷贝指令后，必须等待数据完全传输到 GPU 才能执行下一行代码。
+
+异步（non_blocking=True）：CPU 只要发出了“开始传输”的指令，就立即执行后面的代码，不需要等待传输完成。
+
+前提条件：异步传输必须配合 pin_memory=True 才能真正发挥作用。
+
+2. 为什么要这样写？（性能视角）
+在 LLM 推理（如 vLLM）中，每一毫秒都至关重要。
+
+流水线并行（Overlapping）：当 GPU 还在忙着处理上一组计算时，CPU 已经可以通过 non_blocking=True 把下一组 input_ids 异步塞进显存了。
+
+减少 CPU 负担：使用 DMA 传输时，CPU 不需要参与数据搬运的细节，可以腾出空位去处理更复杂的逻辑（如调度、采样等）。
+
+3. 直观的类比
+想象你在往货车（GPU）上搬运货物（Data）：
+
+普通写法：你把货物放在路边（普通内存），搬运工得先把它搬到站台（锁页内存），然后再搬上车。你必须站在旁边看着车装满才走（同步）。
+
+这段代码的写法：
+
+你提前把货物放到了专属的快速站台（pin_memory=True）。
+
+搬运工（DMA）直接从站台往车上装。
+
+你跟搬运工说“你开始装吧”，然后转头就去忙别的了（non_blocking=True）。
+"""

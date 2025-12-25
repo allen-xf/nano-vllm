@@ -18,10 +18,10 @@ class LLMEngine:
         config_fields = {field.name for field in fields(Config)}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
         config = Config(model, **config_kwargs)
-        self.ps = []
-        self.events = []
+        self.ps = [] #用于多卡
+        self.events = []  #用于多卡
         ctx = mp.get_context("spawn")
-        for i in range(1, config.tensor_parallel_size):
+        for i in range(1, config.tensor_parallel_size): # 这里是子线程
             event = ctx.Event()
             process = ctx.Process(target=ModelRunner, args=(config, i, event))
             process.start()
@@ -31,6 +31,10 @@ class LLMEngine:
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = self.tokenizer.eos_token_id
         self.scheduler = Scheduler(config)
+        # functions to register and unregister cleanup functions. 
+        # These registered functions are called when the interpreter exits normally
+        # Functions registered with atexit will not be called if the program terminates abnormally due to:
+        # A fatal internal error in the Python interpreter.
         atexit.register(self.exit)
 
     def exit(self):
@@ -41,7 +45,7 @@ class LLMEngine:
 
     def add_request(self, prompt: str | list[int], sampling_params: SamplingParams):
         if isinstance(prompt, str):
-            prompt = self.tokenizer.encode(prompt)
+            prompt = self.tokenizer.encode(prompt)  # 从词表中得到id
         seq = Sequence(prompt, sampling_params)
         self.scheduler.add(seq)
 
@@ -50,6 +54,8 @@ class LLMEngine:
         token_ids = self.model_runner.call("run", seqs, is_prefill)
         self.scheduler.postprocess(seqs, token_ids)
         outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
+        # 这里用正负号来区分prefill阶段还是decode阶段， prefill阶段的计算量的所有seq promot token的总和
+        # decode阶段， 因为kv cache，所有每个seql只需要一个token的计算量
         num_tokens = sum(len(seq) for seq in seqs) if is_prefill else -len(seqs)
         return outputs, num_tokens
 
@@ -72,7 +78,7 @@ class LLMEngine:
         prefill_throughput = decode_throughput = 0.
         while not self.is_finished():
             t = perf_counter()
-            output, num_tokens = self.step()
+            output, num_tokens = self.step()  #主要是这句，其他的都是perf的metrics
             if use_tqdm:
                 if num_tokens > 0:
                     prefill_throughput = num_tokens / (perf_counter() - t)

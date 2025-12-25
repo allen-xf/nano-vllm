@@ -44,7 +44,7 @@ class Scheduler:
         while self.running and num_seqs < self.max_num_seqs:
             seq = self.running.popleft()
             while not self.block_manager.can_append(seq):
-                if self.running:
+                if self.running: #一种corner case， 系统内存紧缺，需要弹出
                     self.preempt(self.running.pop())
                 else:
                     self.preempt(seq)

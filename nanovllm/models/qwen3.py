@@ -10,7 +10,12 @@ from nanovllm.layers.linear import QKVParallelLinear, MergedColumnParallelLinear
 from nanovllm.layers.rotary_embedding import get_rope
 from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
 
-
+'''
+num_heads (例如 32): “这个模型一共要有 32 个 Q 头。”
+num_kv_heads (例如 8): “这个模型一共要有 8 个 K 头和 8 个 V 头。”
+tp_size（总显卡数）
+Grouped-Query Attention
+'''
 class Qwen3Attention(nn.Module):
 
     def __init__(
@@ -148,6 +153,7 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # 第一层 residual为None
         if residual is None:
             hidden_states, residual = self.input_layernorm(hidden_states), hidden_states
         else:
@@ -165,6 +171,7 @@ class Qwen3Model(nn.Module):
         config: Qwen3Config,
     ) -> None:
         super().__init__()
+        # n * 1024
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList([Qwen3DecoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -178,6 +185,7 @@ class Qwen3Model(nn.Module):
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(positions, hidden_states, residual)
+        #最后只需要一个隐含层
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 

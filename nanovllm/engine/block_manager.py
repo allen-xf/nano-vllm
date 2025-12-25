@@ -9,7 +9,7 @@ class Block:
 
     def __init__(self, block_id):
         self.block_id = block_id
-        self.ref_count = 0
+        self.ref_count = 0 #引用计算，说明这个block被多少个seq引用， 前缀相同的情况
         self.hash = -1
         self.token_ids = []
 
@@ -33,7 +33,7 @@ class BlockManager:
         self.used_block_ids: set[int] = set()
 
     @classmethod
-    def compute_hash(cls, token_ids: list[int], prefix: int = -1):
+    def compute_hash(cls, token_ids: list[int], prefix: int = -1): #只用token放满block的时候才会计算hash
         h = xxhash.xxh64()
         if prefix != -1:
             h.update(prefix.to_bytes(8, "little"))
@@ -56,7 +56,7 @@ class BlockManager:
     def can_allocate(self, seq: Sequence) -> bool:
         return len(self.free_block_ids) >= seq.num_blocks
 
-    def allocate(self, seq: Sequence):
+    def allocate(self, seq: Sequence): #每个seq 执行一次， prefill阶段
         assert not seq.block_table
         h = -1
         cache_miss = False
@@ -93,15 +93,15 @@ class BlockManager:
     def can_append(self, seq: Sequence) -> bool:
         return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)
 
-    def may_append(self, seq: Sequence):
+    def may_append(self, seq: Sequence): # decode阶段
         block_table = seq.block_table
         last_block = self.blocks[block_table[-1]]
-        if len(seq) % self.block_size == 1:
+        if len(seq) % self.block_size == 1: # 多一个token，分配一个block
             assert last_block.hash != -1
             block_id = self.free_block_ids[0]
             self._allocate_block(block_id)
             block_table.append(block_id)
-        elif len(seq) % self.block_size == 0:
+        elif len(seq) % self.block_size == 0: # block满了，算hash
             assert last_block.hash == -1
             token_ids = seq.block(seq.num_blocks-1)
             prefix = self.blocks[block_table[-2]].hash if len(block_table) > 1 else -1
