@@ -22,7 +22,9 @@ class LinearBase(nn.Module):
         self.tp_dim = tp_dim
         self.tp_rank = dist.get_rank()
         self.tp_size = dist.get_world_size()
+        # 在 PyTorch 的标准实现中，权重矩阵的形状必须是 (output_size, input_size)
         self.weight = nn.Parameter(torch.empty(output_size, input_size))
+        # self 永远指向“当前正在执行操作的那个真实实例”
         self.weight.weight_loader = self.weight_loader
         if bias:
             self.bias = nn.Parameter(torch.empty(output_size))
@@ -60,6 +62,7 @@ class ColumnParallelLinear(LinearBase):
         bias: bool = False,
     ):
         tp_size = dist.get_world_size()
+        # 既然 PyTorch 默认是 (Out, In)，那么当你想要沿着 Output 维度（即逻辑上的“列”）进行切分时，在物理内存上你其实是在切 第 0 维。
         super().__init__(input_size, divide(output_size, tp_size), bias, 0)
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
@@ -70,6 +73,7 @@ class ColumnParallelLinear(LinearBase):
         param_data.copy_(loaded_weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # gate 和 up 一起计算
         return F.linear(x, self.weight, self.bias)
 
 
@@ -78,16 +82,19 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
     def __init__(
         self,
         input_size: int,
-        output_sizes: list[int],
+        output_sizes: list[int], #[3072, 3072]
         bias: bool = False,
     ):
         self.output_sizes = output_sizes
         super().__init__(input_size, sum(output_sizes), bias)
 
+    # 从loaded_weight取数据放到param里面 每个GPU up 一份 gate 一份
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, loaded_shard_id: int):
         param_data = param.data
         shard_offset = sum(self.output_sizes[:loaded_shard_id]) // self.tp_size
         shard_size = self.output_sizes[loaded_shard_id] // self.tp_size
+        # narrow is that it creates a view, not a copy.
+        # torch.narrow(x, 0, 2, 5) is equivalent to x[2:7].
         param_data = param_data.narrow(self.tp_dim, shard_offset, shard_size)
         loaded_weight = loaded_weight.chunk(self.tp_size, self.tp_dim)[self.tp_rank]
         param_data.copy_(loaded_weight)
@@ -147,6 +154,7 @@ class RowParallelLinear(LinearBase):
         param_data.copy_(loaded_weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Row Parallel  self.bias if self.tp_rank == 0 else None 确保全局只有一个偏置生效。
         y = F.linear(x, self.weight, self.bias if self.tp_rank == 0 else None)
         if self.tp_size > 1:
             dist.all_reduce(y)
