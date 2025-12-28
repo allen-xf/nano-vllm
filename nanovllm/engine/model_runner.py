@@ -89,12 +89,13 @@ class ModelRunner:
         return method(*args)
 
     def warmup_model(self):
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
-        max_num_batched_tokens, max_model_len = self.config.max_num_batched_tokens, self.config.max_model_len
-        num_seqs = min(max_num_batched_tokens // max_model_len, self.config.max_num_seqs)
+        torch.cuda.empty_cache()  #clears memory,
+        torch.cuda.reset_peak_memory_stats() #resets the trackers you use to monitor that memory
+        # max_num_batched_tokens 们会将多个请求（Requests）组合成一个 Batch。由于不同的请求长度不同，GPU 处理的压力主要取决于 “这一秒我手里一共有多少个 Token”。max_num_batched_tokens 限制的就是这个总数
+        max_num_batched_tokens, max_model_len = self.config.max_num_batched_tokens, self.config.max_model_len # 16384， 4096
+        num_seqs = min(max_num_batched_tokens // max_model_len, self.config.max_num_seqs) #min(4, 512)
         seqs = [Sequence([0] * max_model_len) for _ in range(num_seqs)]
-        self.run(seqs, True)
+        self.run(seqs, True) #只跑profill
         torch.cuda.empty_cache()
 
     def allocate_kv_cache(self):
@@ -106,7 +107,17 @@ class ModelRunner:
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
+        '''
+        每一个 Block（块）并不是只代表一层，而是代表整个模型所有层中对应那几个 Token 的缓存集合
+        '''
         block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.torch_dtype.itemsize
+        '''
+        total * config.gpu_memory_utilization - used - peak + current
+        total * config.gpu_memory_utilization - used - (peak - current)
+        current 和 peak都是指torch 申请tensor占用的内存
+        used 包括所有的，tensor，驱动，甚至其他进程
+        所以peak - current显示的是tensor 在peak的时候相对于现在会高多少
+        '''
         config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
         assert config.num_kvcache_blocks > 0
         self.kv_cache = torch.empty(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, head_dim)

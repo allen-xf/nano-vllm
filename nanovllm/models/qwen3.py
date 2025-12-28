@@ -101,12 +101,12 @@ class Qwen3MLP(nn.Module):
         hidden_act: str,
     ) -> None:
         super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size,
-            [intermediate_size] * 2,
+        self.gate_up_proj = MergedColumnParallelLinear( #按列做split
+            hidden_size, # 1024
+            [intermediate_size] * 2, # intermediate_size 3072
             bias=False,
         )
-        self.down_proj = RowParallelLinear(
+        self.down_proj = RowParallelLinear( #按行做split
             intermediate_size,
             hidden_size,
             bias=False,
@@ -141,8 +141,8 @@ class Qwen3DecoderLayer(nn.Module):
         )
         self.mlp = Qwen3MLP(
             hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
+            intermediate_size=config.intermediate_size, # 3072
+            hidden_act=config.hidden_act, # 'silu'
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -162,8 +162,12 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
-
-
+'''
+1. Embedding（输入层）
+2. Transformer Blocks（处理层/身体）
+3. LM Head（输出层/头部） 就在这里输出 Logits（将语义向量（state）转换成对每一个单词的预测概率）
+1,3都是和词表相关的操作,参数是共享的
+'''
 class Qwen3Model(nn.Module):
 
     def __init__(
@@ -172,6 +176,7 @@ class Qwen3Model(nn.Module):
     ) -> None:
         super().__init__()
         # n * 1024
+        # 推理中，这个过程其实就是一个查表， 从一个词表中找到seq对应的embedding稠密向量
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList([Qwen3DecoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -185,7 +190,7 @@ class Qwen3Model(nn.Module):
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(positions, hidden_states, residual)
-        #最后只需要一个隐含层
+        # 最后只需要一个隐含层
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
@@ -207,7 +212,7 @@ class Qwen3ForCausalLM(nn.Module):
         self.model = Qwen3Model(config)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         if config.tie_word_embeddings:
-            self.lm_head.weight.data = self.model.embed_tokens.weight.data
+            self.lm_head.weight.data = self.model.embed_tokens.weight.data #参数共享
 
     def forward(
         self,
