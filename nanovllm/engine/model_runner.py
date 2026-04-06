@@ -122,6 +122,7 @@ class ModelRunner:
         assert config.num_kvcache_blocks > 0
         self.kv_cache = torch.empty(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, head_dim)
         layer_id = 0
+        # 2. 把每层的切片绑定到对应 Attention 模块 
         for module in self.model.modules():
             if hasattr(module, "k_cache") and hasattr(module, "v_cache"): # 只有attention层才有这个属性
                 module.k_cache = self.kv_cache[0, layer_id]
@@ -154,6 +155,9 @@ class ModelRunner:
             # # 输出: ['apple', 'banana', 'cherry', 'orange']
             input_ids.extend(seq[seq.num_cached_tokens:]) # 把不同seq 的token展平， 解决不同seq维度不对齐的问题
             positions.extend(list(range(seq.num_cached_tokens, seqlen)))
+            # 用于 Flash Attention 
+            # Q 决定"谁需要算"，K 决定"能看到什么"。缓存的 token 不需要重新算，但必须能被看到。
+            # seqlen_k = seqlen（完整长度）描述的是 KV cache 中有多少有效 token，不是要重新计算多少。
             seqlen_q = seqlen - seq.num_cached_tokens
             seqlen_k = seqlen
             # 相当于push了一个(cu_seqlens_q.back() + seqlen_q)
@@ -169,6 +173,17 @@ class ModelRunner:
                     end = start + self.block_size
                 else:
                     end = start + seq.last_block_num_tokens 
+                '''
+                KV cache 物理内存（展平视角）:
+                block 7:  [slot 1792 ~ 2047]  ← 已缓存，跳过
+                block 12: [slot 3072 ~ 3327]  ← 未缓存，256 个 slot → 写入 slot_mapping
+                block 3:  [slot  768 ~  955]  ← 未缓存，188 个 slot → 写入 slot_mapping
+
+                slot_mapping = [3072, 3073, ..., 3327, 768, 769, ..., 955]
+                                        256 个                 188 个
+                                        共 444 个（= 未缓存的 token 数）
+                '''
+                
                 slot_mapping.extend(list(range(start, end)))
         if cu_seqlens_k[-1] > cu_seqlens_q[-1]:    # prefix cache
             block_tables = self.prepare_block_tables(seqs)
@@ -228,7 +243,7 @@ class ModelRunner:
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]: #从调度到模型真正执行
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
-        logits = self.run_model(input_ids, positions, is_prefill) #概率分布
+        logits = self.run_model(input_ids, positions, is_prefill) #return 概率分布
         token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None # 概率分布传到采样器去 得到next token
         reset_context()
         return token_ids

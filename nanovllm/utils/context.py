@@ -10,6 +10,11 @@ class Context:
     在普通的深度学习中，如果一个 Batch 里的句子长度不一，我们会用 Padding（补零） 把它们凑成一样长。但这会浪费大量的显存和计算资源去处理那些“零”。
     为了提速，高性能框架会将 Batch 里的所有句子首尾相连地拼成一根长条（即 Flatten 操作）。这时候，我们就需要 cu_seqlens_q 来告诉模型：这根长条里，哪一段属于哪句话。
     而 q 代表 Query（在 Attention 机制中对应输入端）
+    example
+    cu_seqlens_q tensor([    0,  4096,  8192, 12288, 16384], device='cuda:0', dtype=torch.int32)
+    cu_seqlens_k tensor([    0,  4096,  8192, 12288, 16384], device='cuda:0', dtype=torch.int32)
+    max_seqlen_q 4096
+    max_seqlen_k 4096
     '''
     cu_seqlens_q: torch.Tensor | None = None # prefill
     cu_seqlens_k: torch.Tensor | None = None # prefill

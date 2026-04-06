@@ -2,6 +2,8 @@ import os
 from nanovllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
 
 def main():
     path = os.path.expanduser("//root/.cache/modelscope/hub/models/Qwen/Qwen3-0.6B")

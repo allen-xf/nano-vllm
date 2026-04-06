@@ -189,6 +189,7 @@ class Qwen3Model(nn.Module):
         hidden_states = self.embed_tokens(input_ids)
         residual = None
         for layer in self.layers:
+            # position的就是1，2，3，4，5，6....
             hidden_states, residual = layer(positions, hidden_states, residual)
         # 最后只需要一个隐含层
         hidden_states, _ = self.norm(hidden_states, residual)
@@ -212,7 +213,7 @@ class Qwen3ForCausalLM(nn.Module):
         self.model = Qwen3Model(config)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         if config.tie_word_embeddings:
-            self.lm_head.weight.data = self.model.embed_tokens.weight.data #参数共享
+            self.lm_head.weight.data = self.model.embed_tokens.weight.data #embedding和lm head(输出头) 参数共享 都是 同一个 W [151936, 1024]
 
     def forward(
         self,

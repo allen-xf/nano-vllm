@@ -50,7 +50,11 @@ def store_kvcache_simplified(
     参数：
     - key: 当前步计算的key张量，形状为[N, num_heads, head_dim]
     - value: 当前步计算的value张量， 形状为[N, num_heads, head_dim]
+<<<<<<< HEAD
     - k_cache: key缓存， 形状为[max_blocks, num_heads, head_dim]
+=======
+    - k_cache: key缓存， 形状为[max_blocks, num_heads, head_dim]， 最细粒度是slot级别
+>>>>>>> c4eb6fd (add comment 3)
     - v_cache: key缓存， 形状为[max_blocks, num_heads, head_dim]
     - slot_mapping: 每个token应该存在缓存中的哪个位置，形状为[N]
     '''
@@ -61,6 +65,7 @@ def store_kvcache_simplified(
     flat_value = value.view(N, -1)
     
     # 根据 slot_mapping 将数据存入缓存
+    # 虽然 for 循环本身在 CPU 上跑，但 k_cache 和 flat_key 都是 CUDA tensor（在 GPU 显存里），所以每次 k_cache[slot] = flat_key[i] 实际上是 CPU 发起一次 GPU kernel 调用来完成数据拷贝。
     for i in range(N):
         slot =slot_mapping[i].item()
         k_cache[slot] = flat_key[i]
@@ -85,8 +90,13 @@ class Attention(nn.Module):
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
         context = get_context()
         k_cache, v_cache = self.k_cache, self.v_cache
+        # 第一步：写入 KV cache
+        # numel() 返回 tensor 中元素的总数， 
+        # warmup 阶段 cache 还没分配，跳过写入；正式推理时 cache 已分配，每次 forward 都会把新的 K/V 写进去。
+        # 在 model_runner.py:123-128
         if k_cache.numel() and v_cache.numel():
             store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
+        # 第二步：计算 Attention（分 prefill 和 decode 两条路径）
         if context.is_prefill:
             if context.block_tables is not None:    # prefix cache
                 k, v = k_cache, v_cache

@@ -67,6 +67,7 @@ class ColumnParallelLinear(LinearBase):
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
         param_data = param.data
+        # tp_dim: 按哪一个维度作tp
         shard_size = param_data.size(self.tp_dim)
         start_idx = self.tp_rank * shard_size
         loaded_weight = loaded_weight.narrow(self.tp_dim, start_idx, shard_size)
@@ -76,7 +77,9 @@ class ColumnParallelLinear(LinearBase):
         # gate 和 up 一起计算
         return F.linear(x, self.weight, self.bias)
 
-
+'''
+QA.md Q17
+'''
 class MergedColumnParallelLinear(ColumnParallelLinear):
 
     def __init__(
@@ -150,6 +153,8 @@ class RowParallelLinear(LinearBase):
         tp_size = dist.get_world_size()
         super().__init__(divide(input_size, tp_size), output_size, bias, 1)
 
+    # param = model.get_parameter(weight_name)， size是 linearBase里面的，
+    # self.weight = nn.Parameter(torch.empty(output_size, input_size))
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
         param_data = param.data
         shard_size = param_data.size(self.tp_dim)

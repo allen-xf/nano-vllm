@@ -58,7 +58,7 @@ class BlockManager:
 
     def allocate(self, seq: Sequence): #每个seq 执行一次， prefill阶段
         assert not seq.block_table
-        h = -1
+        h = -1 # hash
         cache_miss = False
         for i in range(seq.num_blocks):
             token_ids = seq.block(i)
