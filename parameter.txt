@@ -1,5 +1,5 @@
 lm_head.weight, torch.Size([151936, 1024])
-model.embed_tokens.weight, torch.Size([151936, 1024]) #51,936 (词表大小 - Vocabulary Size): 意味着这个模型一共认识 151,936 个“词”（Token）。这包括汉字、英文单词、数字、标点符号等。
+model.embed_tokens.weight, torch.Size([151936, 1024])
 model.layers.0.input_layernorm.weight, torch.Size([1024])
 model.layers.0.mlp.down_proj.weight, torch.Size([1024, 3072])
 model.layers.0.mlp.gate_proj.weight, torch.Size([3072, 1024])

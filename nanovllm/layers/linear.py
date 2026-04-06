@@ -100,7 +100,11 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         param_data.copy_(loaded_weight)
 
 
-class QKVParallelLinear(ColumnParallelLinear):
+'''
+虽然 Q、K、V 在逻辑上是独立的分支，但在硬件层面，把它们拼成一个大的 output_size 进行一次大矩阵乘法，
+比分三次小矩阵乘法效率更高，因为这能充分利用 GPU 的并行计算能力
+'''
+class QKVParallelLinear(ColumnParallelLinear): 
 
     def __init__(
         self,

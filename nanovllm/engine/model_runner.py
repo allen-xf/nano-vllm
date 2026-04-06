@@ -40,7 +40,7 @@ class ModelRunner:
 
         if self.world_size > 1:
             if rank == 0:
-                self.shm = SharedMemory(name="nanovllm", create=True, size=2**20)
+                self.shm = SharedMemory(name="nanovllm", create=True, size=2**20) # 1MB
                 dist.barrier()
             else:
                 dist.barrier()
@@ -108,14 +108,14 @@ class ModelRunner:
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
         '''
-        每一个 Block（块）并不是只代表一层，而是代表整个模型所有层中对应那几个 Token 的缓存集合
+        每一个 Block(块)并不是只代表一层，而是代表整个模型所有层中对应那几个 Token 的缓存集合
         '''
         block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.torch_dtype.itemsize
         '''
         total * config.gpu_memory_utilization - used - peak + current
         total * config.gpu_memory_utilization - used - (peak - current)
         current 和 peak都是指torch 申请tensor占用的内存
-        used 包括所有的，tensor，驱动，甚至其他进程
+        used 包括所有的,tensor,驱动,甚至其他进程
         所以peak - current显示的是tensor 在peak的时候相对于现在会高多少
         '''
         config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
@@ -123,7 +123,7 @@ class ModelRunner:
         self.kv_cache = torch.empty(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, head_dim)
         layer_id = 0
         for module in self.model.modules():
-            if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
+            if hasattr(module, "k_cache") and hasattr(module, "v_cache"): # 只有attention层才有这个属性
                 module.k_cache = self.kv_cache[0, layer_id]
                 module.v_cache = self.kv_cache[1, layer_id]
                 layer_id += 1
@@ -152,7 +152,7 @@ class ModelRunner:
             # fruits.extend(more_fruits)
             # print(fruits) 
             # # 输出: ['apple', 'banana', 'cherry', 'orange']
-            input_ids.extend(seq[seq.num_cached_tokens:])
+            input_ids.extend(seq[seq.num_cached_tokens:]) # 把不同seq 的token展平， 解决不同seq维度不对齐的问题
             positions.extend(list(range(seq.num_cached_tokens, seqlen)))
             seqlen_q = seqlen - seq.num_cached_tokens
             seqlen_k = seqlen

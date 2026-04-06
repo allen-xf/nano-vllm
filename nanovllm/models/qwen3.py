@@ -41,7 +41,7 @@ class Qwen3Attention(nn.Module):
         self.head_dim = head_dim or hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim ** -0.5
+        self.scaling = self.head_dim ** -0.5 # Scaling Factor attention公式下面分母那个东西
         self.qkv_bias = qkv_bias
 
         self.qkv_proj = QKVParallelLinear(

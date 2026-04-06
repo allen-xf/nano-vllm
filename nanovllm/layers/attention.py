@@ -39,6 +39,32 @@ def store_kvcache(key: torch.Tensor, value: torch.Tensor, k_cache: torch.Tensor,
     assert slot_mapping.numel() == N
     store_kvcache_kernel[(N,)](key, key.stride(0), value, value.stride(0), k_cache, v_cache, slot_mapping, D)
 
+def store_kvcache_simplified(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    slot_mapping: torch.Tensor
+):
+    '''
+    参数：
+    - key: 当前步计算的key张量，形状为[N, num_heads, head_dim]
+    - value: 当前步计算的value张量， 形状为[N, num_heads, head_dim]
+    - k_cache: key缓存， 形状为[max_blocks, num_heads, head_dim]
+    - v_cache: key缓存， 形状为[max_blocks, num_heads, head_dim]
+    - slot_mapping: 每个token应该存在缓存中的哪个位置，形状为[N]
+    '''
+    N= key.shape
+    
+    # 展平 head和head_dim维度
+    flat_key = key.view(N, -1)
+    flat_value = value.view(N, -1)
+    
+    # 根据 slot_mapping 将数据存入缓存
+    for i in range(N):
+        slot =slot_mapping[i].item()
+        k_cache[slot] = flat_key[i]
+        v_cache[slot] = flat_value[i]
 
 class Attention(nn.Module):
 
