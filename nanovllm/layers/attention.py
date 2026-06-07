@@ -21,10 +21,51 @@ def store_kvcache_kernel(
     idx = tl.program_id(0)
     slot = tl.load(slot_mapping_ptr + idx)
     if slot == -1: return
+    '''
+    idx = tl.program_id(0)    # 当前线程块处理第几个 token
+    key_stride = key.stride(0) # = 1024，token 之间的步长
+    D = 1024                   # num_heads × head_dim = 8 × 128
+
+    key_offsets = idx * key_stride + tl.arange(0, D)
+    #            ↑                   ↑
+    #         起始偏移              [0, 1, 2, ..., 1023]
+
+    以具体数字为例
+
+    key 在显存中是连续排列的：
+
+    显存地址:  0    1    2   ...  1023  1024  1025  ...  2047  2048  ...
+                |←── token 0 ──→|  |←── token 1 ──→|  |←── token 2 ──→|
+
+    idx=0（第 0 个 token）：
+    0 * 1024 + [0, 1, 2, ..., 1023] = [0, 1, 2, ..., 1023]
+
+    idx=1（第 1 个 token）：
+    1 * 1024 + [0, 1, 2, ..., 1023] = [1024, 1025, 1026, ..., 2047]
+
+    idx=2（第 2 个 token）：
+    2 * 1024 + [0, 1, 2, ..., 1023] = [2048, 2049, 2050, ..., 3071]
+
+    然后 tl.load(key_ptr + key_offsets) 一次性把这 1024 个元素从显存读出来。
+
+    类比 Python
+
+    # 等价于
+    flat_key = key.view(N, -1)    # [N, 1024]
+    flat_key[idx]                  # 取第 idx 行的 1024 个元素
+    '''
     key_offsets = idx * key_stride + tl.arange(0, D)
     value_offsets = idx * value_stride + tl.arange(0, D)
     key = tl.load(key_ptr + key_offsets)
     value = tl.load(value_ptr + value_offsets)
+    '''
+    slot = 3075    # 从 slot_mapping 查到的物理位置
+    D = 1024
+    cache_offsets = 3075 * 1024 + [0, 1, 2, ..., 1023]
+        = [3148800, 3148801, ..., 3149823]
+    然后 tl.store(k_cache_ptr + cache_offsets, key) 把 1024 个元素写到这个位置。
+    '''
+    
     cache_offsets = slot * D + tl.arange(0, D)
     tl.store(k_cache_ptr + cache_offsets, key)
     tl.store(v_cache_ptr + cache_offsets, value)
@@ -50,11 +91,7 @@ def store_kvcache_simplified(
     参数：
     - key: 当前步计算的key张量，形状为[N, num_heads, head_dim]
     - value: 当前步计算的value张量， 形状为[N, num_heads, head_dim]
-<<<<<<< HEAD
-    - k_cache: key缓存， 形状为[max_blocks, num_heads, head_dim]
-=======
     - k_cache: key缓存， 形状为[max_blocks, num_heads, head_dim]， 最细粒度是slot级别
->>>>>>> c4eb6fd (add comment 3)
     - v_cache: key缓存， 形状为[max_blocks, num_heads, head_dim]
     - slot_mapping: 每个token应该存在缓存中的哪个位置，形状为[N]
     '''
