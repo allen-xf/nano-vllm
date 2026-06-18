@@ -65,7 +65,6 @@ def store_kvcache_kernel(
         = [3148800, 3148801, ..., 3149823]
     然后 tl.store(k_cache_ptr + cache_offsets, key) 把 1024 个元素写到这个位置。
     '''
-    
     cache_offsets = slot * D + tl.arange(0, D)
     tl.store(k_cache_ptr + cache_offsets, key)
     tl.store(v_cache_ptr + cache_offsets, value)
@@ -96,11 +95,11 @@ def store_kvcache_simplified(
     - slot_mapping: 每个token应该存在缓存中的哪个位置，形状为[N]
     '''
     N= key.shape
-    
+
     # 展平 head和head_dim维度
     flat_key = key.view(N, -1)
     flat_value = value.view(N, -1)
-    
+
     # 根据 slot_mapping 将数据存入缓存
     # 虽然 for 循环本身在 CPU 上跑，但 k_cache 和 flat_key 都是 CUDA tensor（在 GPU 显存里），所以每次 k_cache[slot] = flat_key[i] 实际上是 CPU 发起一次 GPU kernel 调用来完成数据拷贝。
     for i in range(N):
@@ -127,22 +126,50 @@ class Attention(nn.Module):
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
         context = get_context()
         k_cache, v_cache = self.k_cache, self.v_cache
-        # 第一步：写入 KV cache
-        # numel() 返回 tensor 中元素的总数， 
+        # numel() 返回 tensor 中元素的总数，
         # warmup 阶段 cache 还没分配，跳过写入；正式推理时 cache 已分配，每次 forward 都会把新的 K/V 写进去。
         # 在 model_runner.py:123-128
-        if k_cache.numel() and v_cache.numel():
-            store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
-        # 第二步：计算 Attention（分 prefill 和 decode 两条路径）
-        if context.is_prefill:
-            if context.block_tables is not None:    # prefix cache
-                k, v = k_cache, v_cache
-            o = flash_attn_varlen_func(q, k, v,
-                                       max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
-                                       max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
-                                       softmax_scale=self.scale, causal=True, block_table=context.block_tables)
-        else:    # decode
+        num_prefill_tokens = context.num_prefill_tokens
+        num_decode_seqs = context.num_decode_seqs
+
+        # 计算 Attention（分 prefill 和 decode 两条路径，chunked prefill 时可能同时存在）
+        if context.has_prefill:
+            # 第一步：处理 prefill 部分
+            p_q, p_k, p_v = q[:num_prefill_tokens], k[:num_prefill_tokens], v[:num_prefill_tokens]
+
+            # 写入 prefill 的 KV cache
+            #  warmup 时 KV cache 还没分配，k_cache.numel() == 0，所以跳过写入。warmup结束后会accolcate kv cache
+            if k_cache.numel() and v_cache.numel():
+                store_kvcache(p_k, p_v, k_cache, v_cache, context.p_slot_mapping)
+
+            if context.block_tables is not None:    # prefix cache or chunked prefill
+                p_k, p_v = k_cache, v_cache
+            p_o = flash_attn_varlen_func(p_q, p_k, p_v,
+                                         max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
+                                         max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
+                                         softmax_scale=self.scale, causal=True, block_table=context.block_tables)
+
+            if num_decode_seqs > 0:
+                # decode 部分
+                d_q = q[num_prefill_tokens:]
+                d_k = k[num_prefill_tokens:]
+                d_v = v[num_prefill_tokens:]
+
+                # 写入 decode 的 KV cache
+                if k_cache.numel() and v_cache.numel():
+                    store_kvcache(d_k, d_v, k_cache, v_cache, context.decode_slot_mapping)
+
+                d_o = flash_attn_with_kvcache(d_q.unsqueeze(1), k_cache, v_cache,
+                                              cache_seqlens=context.decode_context_lens, block_table=context.decode_block_tables,
+                                              softmax_scale=self.scale, causal=True).squeeze(1)
+                o = torch.cat([p_o, d_o], dim=0)
+            else:
+                o = p_o
+        else:
+            # 纯 decode
+            if k_cache.numel() and v_cache.numel():
+                store_kvcache(k, v, k_cache, v_cache, context.decode_slot_mapping)
             o = flash_attn_with_kvcache(q.unsqueeze(1), k_cache, v_cache,
-                                        cache_seqlens=context.context_lens, block_table=context.block_tables, 
+                                        cache_seqlens=context.decode_context_lens, block_table=context.block_tables,
                                         softmax_scale=self.scale, causal=True)
         return o

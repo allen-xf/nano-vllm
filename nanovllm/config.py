@@ -12,6 +12,7 @@ class Config:
     gpu_memory_utilization: float = 0.9 # 现在可以先理解为kv cache 能使用的GPU内存， kv cache是如何更新的
     tensor_parallel_size: int = 1 # tensor 并线计算的时候要用到多少张GPu
     enforce_eager: bool = False # torch的一种运行模式， eager 是指 即时模式， 每次torch 操作cpu都会调用一次gpu kernal，更慢一点 方便调试
+    enable_chunked_prefill: bool = True # 是否开启 chunked prefill，关闭时 prefill 一次性处理完所有 prompt tokens
     hf_config: AutoConfig | None = None # AutoConfig 类型
     eos: int = -1 #end of sequence
     kvcache_block_size: int = 256 # Size of blocks for KV cache allocation 假如一个完成的sequence是1024个token，那么需要4个block
@@ -26,4 +27,3 @@ class Config:
         self.hf_config = AutoConfig.from_pretrained(self.model) # 根据指定的模型标识符，从云端（或本地缓存）下载并加载该模型的元数据配置文件
         self.hf_config.save_pretrained('/root/llm/nano-vllm/')
         self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)
-        assert self.max_num_batched_tokens >= self.max_model_len

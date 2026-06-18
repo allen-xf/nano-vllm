@@ -75,11 +75,18 @@ class ParallelLMHead(VocabParallelEmbedding):
 
     def forward(self, x: torch.Tensor):
         context = get_context()
-        if context.is_prefill:
-            # 在“预填充（Prefill）”阶段，丢弃没用的中间预测，只保留每个序列最后一个 Token 的特征
-            last_indices = context.cu_seqlens_q[1:] - 1
-            # 在内存中把这些挑出来的向量重新排整齐
-            x = x[last_indices].contiguous()
+        if context.has_prefill:
+            indices = []
+            # prefill 部分：只取完成 prefill 的 seq 的 last token
+            all_last_indices = (context.cu_seqlens_q[1:] - 1).tolist()
+            for i in context.finishing_prefill_indices:
+                indices.append(all_last_indices[i])
+            # decode 部分：每个 token 都需要
+            num_prefill_tokens = context.num_prefill_tokens
+            for i in range(context.num_decode_seqs):
+                indices.append(num_prefill_tokens + i)
+            indices = torch.tensor(indices, dtype=torch.int64, device=x.device)
+            x = x[indices].contiguous()
         logits = F.linear(x, self.weight)
         if self.tp_size > 1:
             all_logits = [torch.empty_like(logits) for _ in range(self.tp_size)] if self.tp_rank == 0 else None

@@ -14,7 +14,7 @@ from nanovllm.engine.model_runner import ModelRunner
 
 class LLMEngine:
 
-    def __init__(self, model, **kwargs):
+    def __init__(self, model, collect_metrics: bool = False, **kwargs):
         config_fields = {field.name for field in fields(Config)}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
         config = Config(model, **config_kwargs)
@@ -30,16 +30,21 @@ class LLMEngine:
         self.model_runner = ModelRunner(config, 0, self.events)
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = self.tokenizer.eos_token_id
-        self.scheduler = Scheduler(config)
-        # functions to register and unregister cleanup functions. 
+        self.scheduler = Scheduler(config, collect_metrics=collect_metrics)
+        # functions to register and unregister cleanup functions.
         # These registered functions are called when the interpreter exits normally
         # Functions registered with atexit will not be called if the program terminates abnormally due to:
         # A fatal internal error in the Python interpreter.
         atexit.register(self.exit)
 
     def exit(self):
+        if not hasattr(self, 'model_runner'):
+            return
+        atexit.unregister(self.exit)
         self.model_runner.call("exit")
         del self.model_runner
+        import gc
+        gc.collect()
         for p in self.ps:
             p.join()
 
@@ -49,15 +54,19 @@ class LLMEngine:
         seq = Sequence(prompt, sampling_params)
         self.scheduler.add(seq)
 
-    def step(self):
-        seqs, is_prefill = self.scheduler.schedule()
-        token_ids = self.model_runner.call("run", seqs, is_prefill)
-        self.scheduler.postprocess(seqs, token_ids)
-        outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
-        # 这里用正负号来区分prefill阶段还是decode阶段， prefill阶段的计算量的所有seq promot token的总和
-        # decode阶段， 因为kv cache，所有每个seql只需要一个token的计算量
-        num_tokens = sum(len(seq) for seq in seqs) if is_prefill else -len(seqs)
-        return outputs, num_tokens
+    def step(self, verbose=False):
+        prefill_seqs, decode_seqs = self.scheduler.schedule()
+        self.scheduler.record_step(prefill_seqs, decode_seqs)
+        if verbose and (prefill_seqs or decode_seqs):
+            print(f"  Step: prefill={len(prefill_seqs)}, decode={len(decode_seqs)}")
+        token_ids = self.model_runner.call("run", prefill_seqs, decode_seqs)
+        self.scheduler.postprocess(prefill_seqs, decode_seqs, token_ids)
+        all_seqs = prefill_seqs + decode_seqs
+        outputs = [(seq.seq_id, seq.completion_token_ids) for seq in all_seqs if seq.is_finished]
+        # 统计 token 数
+        num_prefill_tokens = sum(seq.scheduled_chunk_size for seq in prefill_seqs) if prefill_seqs else 0
+        num_decode_tokens = len(decode_seqs)
+        return outputs, num_prefill_tokens, num_decode_tokens
 
     def is_finished(self):
         return self.scheduler.is_finished()
@@ -67,6 +76,7 @@ class LLMEngine:
         prompts: list[str] | list[list[int]],
         sampling_params: SamplingParams | list[SamplingParams],
         use_tqdm: bool = True,
+        verbose: bool = False,
     ) -> list[str]:
         if use_tqdm:
             pbar = tqdm(total=len(prompts), desc="Generating", dynamic_ncols=True)
@@ -78,12 +88,13 @@ class LLMEngine:
         prefill_throughput = decode_throughput = 0.
         while not self.is_finished():
             t = perf_counter()
-            output, num_tokens = self.step()  #主要是这句，其他的都是perf的metrics
+            output, num_prefill_tokens, num_decode_tokens = self.step(verbose=verbose)
             if use_tqdm:
-                if num_tokens > 0:
-                    prefill_throughput = num_tokens / (perf_counter() - t)
-                else:
-                    decode_throughput = -num_tokens / (perf_counter() - t)
+                elapsed = perf_counter() - t
+                if num_prefill_tokens > 0:
+                    prefill_throughput = num_prefill_tokens / elapsed
+                if num_decode_tokens > 0:
+                    decode_throughput = num_decode_tokens / elapsed
                 pbar.set_postfix({
                     "Prefill": f"{int(prefill_throughput)}tok/s",
                     "Decode": f"{int(decode_throughput)}tok/s",
