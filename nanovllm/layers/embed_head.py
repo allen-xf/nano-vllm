@@ -87,6 +87,14 @@ class ParallelLMHead(VocabParallelEmbedding):
                 indices.append(num_prefill_tokens + i)
             indices = torch.tensor(indices, dtype=torch.int64, device=x.device)
             x = x[indices].contiguous()
+        logits = self._compute_logits(x)
+        return logits
+
+    def forward_all(self, x: torch.Tensor):
+        # 返回所有位置的 logits (不做 index 选择), 用于 speculative decoding 验证
+        return self._compute_logits(x)
+
+    def _compute_logits(self, x: torch.Tensor):
         logits = F.linear(x, self.weight)
         if self.tp_size > 1:
             all_logits = [torch.empty_like(logits) for _ in range(self.tp_size)] if self.tp_rank == 0 else None
@@ -94,9 +102,9 @@ class ParallelLMHead(VocabParallelEmbedding):
             为什么这里不用 all_reduce？
             你之前在 Embedding 层看到了 all_reduce，而这里用 gather，这是因为它们的并行数学逻辑不同：
 
-            Embedding (Row Parallel)：每个 GPU 算出的结果是“不完整的特征”，需要把大家的值加起来（Sum）才是正确的。所以用 all_reduce。
+            Embedding (Row Parallel)：每个 GPU 算出的结果是”不完整的特征”，需要把大家的值加起来（Sum）才是正确的。所以用 all_reduce。
 
-            LM Head (Column Parallel)：每个 GPU 算出的结果是“部分词的分数”，它们不需要相加，而是需要拼接（Concatenate）在一起。所以用 gather。
+            LM Head (Column Parallel)：每个 GPU 算出的结果是”部分词的分数”，它们不需要相加，而是需要拼接（Concatenate）在一起。所以用 gather。
             '''
             dist.gather(logits, all_logits, 0)
             logits = torch.cat(all_logits, -1) if self.tp_rank == 0 else None

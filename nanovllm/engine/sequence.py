@@ -29,6 +29,8 @@ class Sequence:
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
+        # speculative decoding: 上一轮 draft serial 产生的 K 个 token (target vocab)
+        self.prev_draft_tokens: list[int] = []
 
     def __len__(self):
         return self.num_tokens
@@ -81,6 +83,11 @@ class Sequence:
         self.last_token = token_id
         self.num_tokens += 1
         self.num_computed_tokens += 1
+
+    def append_tokens(self, token_ids: list[int]):
+        """批量追加多个 token（speculative decoding 验证后使用）"""
+        for tid in token_ids:
+            self.append_token(tid)
 
     def __getstate__(self):
         return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_computed_tokens,

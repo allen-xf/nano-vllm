@@ -11,6 +11,7 @@ def default_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor):
 
 def load_model(model: nn.Module, path: str):
     packed_modules_mapping = getattr(model, "packed_modules_mapping", {})
+    named_buffers = dict(model.named_buffers())
     # Safetensors is a new simple format for storing tensors safely (as opposed to pickle) and that is still fast (zero-copy). Safetensors is really fast 🚀.
     # https://dev.to/lukehinds/understanding-safetensors-a-secure-alternative-to-pickle-for-ml-models-o71
     with open("parameter.txt", "w", encoding="utf-8") as out_file:
@@ -18,6 +19,10 @@ def load_model(model: nn.Module, path: str):
             with safe_open(file, "pt", "cpu") as f:
                 for weight_name in f.keys():
                     out_file.write(f"{weight_name}, {f.get_tensor(weight_name).shape}\n")
+                    # 尝试作为 buffer 加载（如 d2t）
+                    if weight_name in named_buffers:
+                        named_buffers[weight_name].copy_(f.get_tensor(weight_name))
+                        continue
                     for k in packed_modules_mapping:
                         if k in weight_name: ##example weight_name='model.layers.0.mlp.gate_proj.weight'
                             '''
@@ -25,7 +30,7 @@ def load_model(model: nn.Module, path: str):
                             "up_proj": ("gate_up_proj", 1),
                             shard_id就是这个 0/1
                             '''
-                            v, shard_id = packed_modules_mapping[k] 
+                            v, shard_id = packed_modules_mapping[k]
                             param_name = weight_name.replace(k, v)
                             '''
                             #example param_name='model.layers.0.mlp.gate_up_proj.weight'

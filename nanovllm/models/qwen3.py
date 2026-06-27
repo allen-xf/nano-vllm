@@ -180,19 +180,45 @@ class Qwen3Model(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList([Qwen3DecoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.spec_debug = False
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-    ) -> torch.Tensor:
+        capture_layers: list[int] | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[int, torch.Tensor]]:
         hidden_states = self.embed_tokens(input_ids)
+        assert hidden_states.shape[0] == positions.shape[0], (
+            hidden_states.shape, positions.shape
+        )
         residual = None
-        for layer in self.layers:
+        captured = {} if capture_layers else None
+        # 一次性诊断：decode时(单token)打印逐层 residual stream norm
+        is_decode_diag = (self.spec_debug and captured is not None and input_ids.shape[0] <= 3
+                          and not hasattr(self, '_decode_layer_diag_done'))
+        for i, layer in enumerate(self.layers):
+            if captured is not None and i in capture_layers:
+                # 捕获层输入的残差流（EAGLE3 训练约定：capture BEFORE layer runs）
+                captured[i] = (hidden_states + residual).detach() if residual is not None else hidden_states.detach()
             # position的就是1，2，3，4，5，6....
             hidden_states, residual = layer(positions, hidden_states, residual)
+            # 诊断：decode 时每隔几层打印 residual stream norm
+            if is_decode_diag and (i < 4 or i in capture_layers or i == len(self.layers) - 1 or i % 6 == 0):
+                rs = hidden_states + residual if residual is not None else hidden_states
+                print(f"    [DECODE-LAYER] layer {i} done: residual_stream norm={rs[0].norm().item():.2f}")
+        if is_decode_diag:
+            self._decode_layer_diag_done = True
         # 最后只需要一个隐含层
         hidden_states, _ = self.norm(hidden_states, residual)
+        if captured is not None:
+            if self.spec_debug and not hasattr(self, '_fuse_logged'):
+                self._fuse_logged = True
+                for l in capture_layers:
+                    c = captured[l]
+                    print(f"    [FUSE] layer {l}: shape={c.shape}, norm={c.norm().item():.2f}, "
+                          f"mean={c.mean().item():.4f}, std={c.std().item():.4f}")
+            return hidden_states, captured
         return hidden_states
 
 
@@ -219,8 +245,9 @@ class Qwen3ForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-    ) -> torch.Tensor:
-        return self.model(input_ids, positions)
+        capture_layers: list[int] | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[int, torch.Tensor]]:
+        return self.model(input_ids, positions, capture_layers=capture_layers)
 
     def compute_logits(
         self,

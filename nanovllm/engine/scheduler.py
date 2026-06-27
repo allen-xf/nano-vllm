@@ -12,6 +12,8 @@ class Scheduler:
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.enable_chunked_prefill = config.enable_chunked_prefill
         self.eos = config.eos
+        self.has_spec = config.draft_model is not None
+        self.num_spec_tokens = config.num_spec_tokens
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
@@ -34,7 +36,7 @@ class Scheduler:
         if not self.collect_metrics:
             return
         prefill_tokens = sum(s.scheduled_chunk_size for s in prefill_seqs) if prefill_seqs else 0
-        decode_tokens = len(decode_seqs)
+        decode_tokens = sum(self.decode_target_cost(s) for s in decode_seqs) if decode_seqs else 0
         utilization = (prefill_tokens + decode_tokens) / self.max_num_batched_tokens
         m = self._metrics
         m["step_count"] += 1
@@ -71,6 +73,16 @@ class Scheduler:
         else:
             return self._schedule_non_chunked()
 
+    def decode_target_cost(self, seq: Sequence) -> int:
+        if not self.has_spec:
+            return 1
+        if len(seq.prev_draft_tokens) != self.num_spec_tokens:
+            raise RuntimeError(
+                f"spec decode seq {seq.seq_id} missing prev_draft_tokens: "
+                f"got {len(seq.prev_draft_tokens)}, expected {self.num_spec_tokens}"
+            )
+        return self.num_spec_tokens + 1
+
     def _schedule_non_chunked(self) -> tuple[list[Sequence], list[Sequence]]:
         """非 chunked 模式：prefill 优先，prefill/decode 互斥"""
         prefill_seqs = []
@@ -103,20 +115,33 @@ class Scheduler:
         scheduled_running = []
         while self.running and num_seqs < self.max_num_seqs:
             seq = self.running.popleft()
-            if num_batched_tokens + 1 > self.max_num_batched_tokens:
+            decode_cost = self.decode_target_cost(seq)
+            if num_batched_tokens + decode_cost > self.max_num_batched_tokens:
                 scheduled_running.append(seq)  # budget 不够
                 continue
-            while not self.block_manager.can_append(seq):
-                if self.running:
-                    self.preempt(self.running.pop())
+            if self.has_spec:
+                while not self.block_manager.can_append_n(seq, decode_cost):
+                    if self.running:
+                        self.preempt(self.running.pop())
+                    else:
+                        self.preempt(seq)
+                        break
                 else:
-                    self.preempt(seq)
-                    break
+                    decode_seqs.append(seq)
+                    num_batched_tokens += decode_cost
+                    num_seqs += 1
             else:
-                self.block_manager.may_append(seq)
-                decode_seqs.append(seq)
-                num_batched_tokens += 1
-                num_seqs += 1
+                while not self.block_manager.can_append(seq):
+                    if self.running:
+                        self.preempt(self.running.pop())
+                    else:
+                        self.preempt(seq)
+                        break
+                else:
+                    self.block_manager.may_append(seq)
+                    decode_seqs.append(seq)
+                    num_batched_tokens += decode_cost
+                    num_seqs += 1
         for seq in scheduled_running:
             self.running.append(seq)
 
@@ -149,34 +174,50 @@ class Scheduler:
                 prefill_seqs.append(seq)
             else:
                 # decode
-                if num_batched_tokens + 1 > self.max_num_batched_tokens:
+                decode_cost = self.decode_target_cost(seq)
+                if num_batched_tokens + decode_cost > self.max_num_batched_tokens:
                     scheduled_running.append(seq)
                     continue
-                while not self.block_manager.can_append(seq):
-                    if self.running:
-                        self.preempt(self.running.pop())
+                if self.has_spec:
+                    while not self.block_manager.can_append_n(seq, decode_cost):
+                        if self.running:
+                            self.preempt(self.running.pop())
+                        else:
+                            self.preempt(seq)
+                            break
                     else:
-                        self.preempt(seq)
-                        break
+                        decode_seqs.append(seq)
+                        num_batched_tokens += decode_cost
+                        num_seqs += 1
                 else:
-                    self.block_manager.may_append(seq)
-                    decode_seqs.append(seq)
-                    num_batched_tokens += 1
-                    num_seqs += 1
+                    while not self.block_manager.can_append(seq):
+                        if self.running:
+                            self.preempt(self.running.pop())
+                        else:
+                            self.preempt(seq)
+                            break
+                    else:
+                        self.block_manager.may_append(seq)
+                        decode_seqs.append(seq)
+                        num_batched_tokens += decode_cost
+                        num_seqs += 1
         for seq in scheduled_running:
             self.running.append(seq)
 
         # 2. 从 waiting 调度新 prefill（用剩余 budget）
         while self.waiting and num_seqs < self.max_num_seqs:
             seq = self.waiting[0]
-            chunk_size = min(seq.num_uncomputed_tokens, self.max_num_batched_tokens - num_batched_tokens)
-            if chunk_size <= 0:
+            remaining_budget = self.max_num_batched_tokens - num_batched_tokens
+            if remaining_budget <= 0:
                 break
             if not seq.block_table:
                 if not self.block_manager.can_allocate(seq):
                     break
                 self.block_manager.allocate(seq)
                 seq.num_computed_tokens = seq.num_cached_tokens
+            chunk_size = min(seq.num_uncomputed_tokens, remaining_budget)
+            if chunk_size <= 0:
+                break
             seq.scheduled_chunk_size = chunk_size
             num_batched_tokens += chunk_size
             num_seqs += 1
@@ -192,8 +233,34 @@ class Scheduler:
     def preempt(self, seq: Sequence):
         seq.status = SequenceStatus.WAITING
         seq.num_computed_tokens = 0
+        seq.prev_draft_tokens = []
         self.block_manager.deallocate(seq)
         self.waiting.appendleft(seq)
+
+    def postprocess_speculative_step(self, result: dict):
+        """统一 spec step 后处理：prefill/decode 都由 model runner 维护 draft 状态。"""
+        prefill_seqs = result["prefill_seqs"]
+        prefill_token_ids = result["prefill_token_ids"]
+        decode_seqs = result["decode_seqs"]
+        accepted_tokens_per_seq = result["decode_accepted_tokens"]
+
+        for seq, token_id in zip(prefill_seqs, prefill_token_ids):
+            seq.num_computed_tokens += seq.scheduled_chunk_size
+            if not seq.is_prefill:
+                assert token_id is not None
+                seq.append_token(token_id)
+                if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens >= seq.max_tokens:
+                    seq.status = SequenceStatus.FINISHED
+                    self.block_manager.deallocate(seq)
+                    self.running.remove(seq)
+
+        for seq, accepted_tokens in zip(decode_seqs, accepted_tokens_per_seq):
+            seq.append_tokens(accepted_tokens)
+            last_token = accepted_tokens[-1]
+            if (not seq.ignore_eos and last_token == self.eos) or seq.num_completion_tokens >= seq.max_tokens:
+                seq.status = SequenceStatus.FINISHED
+                self.block_manager.deallocate(seq)
+                self.running.remove(seq)
 
     def postprocess(self, prefill_seqs: list[Sequence], decode_seqs: list[Sequence], token_ids: list[int]):
         token_idx = 0
@@ -208,6 +275,7 @@ class Scheduler:
                     self.block_manager.deallocate(seq)
                     self.running.remove(seq)
         for seq in decode_seqs:
+            seq.prev_draft_tokens = []  # 走了 run() 路径，draft tokens 过时，清空
             seq.append_token(token_ids[token_idx])
             token_idx += 1
             if (not seq.ignore_eos and token_ids[token_idx - 1] == self.eos) or seq.num_completion_tokens == seq.max_tokens:

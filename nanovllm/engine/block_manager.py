@@ -60,10 +60,14 @@ class BlockManager:
         assert not seq.block_table
         h = -1 # hash
         cache_miss = False
+        max_cache_hit_tokens = seq.num_tokens - 1
         for i in range(seq.num_blocks):
             token_ids = seq.block(i)
-            h = self.compute_hash(token_ids, h) if len(token_ids) == self.block_size else -1
-            block_id = self.hash_to_block_id.get(h, -1)
+            is_full_block = len(token_ids) == self.block_size
+            h = self.compute_hash(token_ids, h) if is_full_block else -1
+            block_end = (i + 1) * self.block_size
+            can_hit_cache = is_full_block and block_end <= max_cache_hit_tokens
+            block_id = self.hash_to_block_id.get(h, -1) if can_hit_cache else -1
             if block_id == -1 or self.blocks[block_id].token_ids != token_ids:
                 cache_miss = True
             if cache_miss:
@@ -93,6 +97,21 @@ class BlockManager:
     def can_append(self, seq: Sequence) -> bool:
         return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)
 
+    def num_extra_blocks_for_append(self, seq: Sequence, n: int) -> int:
+        """返回从当前逻辑长度后追加 n 个 slot 还需要多少新 block。"""
+        num_blocks = len(seq.block_table)
+        extra_blocks = 0
+        temp_len = len(seq)
+        for _ in range(n):
+            block_idx = temp_len // self.block_size
+            if block_idx >= num_blocks + extra_blocks:
+                extra_blocks += 1
+            temp_len += 1
+        return extra_blocks
+
+    def can_append_n(self, seq: Sequence, n: int) -> bool:
+        return len(self.free_block_ids) >= self.num_extra_blocks_for_append(seq, n)
+
     def may_append(self, seq: Sequence): # decode阶段
         block_table = seq.block_table
         last_block = self.blocks[block_table[-1]]
@@ -110,3 +129,29 @@ class BlockManager:
             self.hash_to_block_id[h] = last_block.block_id
         else:
             assert last_block.hash == -1
+
+    def append_n_slots(self, seq: Sequence, n: int) -> list[int]:
+        """预分配 n 个 token 的 blocks 并返回 slot 列表（不修改 seq.num_tokens）"""
+        slots = []
+        temp_len = len(seq)
+        for _ in range(n):
+            block_idx = temp_len // self.block_size
+            # 当前 block 不存在时分配新 block
+            if block_idx >= len(seq.block_table):
+                block_id = self.free_block_ids[0]
+                self._allocate_block(block_id)
+                seq.block_table.append(block_id)
+            block_offset = temp_len % self.block_size
+            slot = seq.block_table[block_idx] * self.block_size + block_offset
+            slots.append(slot)
+            temp_len += 1
+        return slots
+
+    def rollback_blocks(self, seq: Sequence, target_num_blocks: int):
+        """回滚 block_table 到 target_num_blocks，释放多余的 blocks"""
+        while len(seq.block_table) > target_num_blocks:
+            block_id = seq.block_table.pop()
+            block = self.blocks[block_id]
+            block.ref_count -= 1
+            if block.ref_count == 0:
+                self._deallocate_block(block_id)
