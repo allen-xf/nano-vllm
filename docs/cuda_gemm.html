@@ -1,0 +1,1556 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CUDA 编程入门 & GEMM 实现</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-card: #161b22;
+    --bg-code: #1c2128;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --accent2: #7ee787;
+    --accent3: #d2a8ff;
+    --accent4: #ffa657;
+    --accent5: #ff7b72;
+    --accent6: #79c0ff;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.75;
+    padding: 0;
+  }
+
+  /* --- Header --- */
+  .hero {
+    background: linear-gradient(135deg, #0d1117 0%, #161b22 50%, #1a1f2b 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 60px 0 50px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: radial-gradient(ellipse at 50% 0%, rgba(88,166,255,0.08) 0%, transparent 70%);
+    pointer-events: none;
+  }
+  .hero h1 {
+    font-size: 2.6em;
+    font-weight: 700;
+    background: linear-gradient(135deg, var(--accent), var(--accent3));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 12px;
+    position: relative;
+  }
+  .hero .subtitle {
+    color: var(--text-dim);
+    font-size: 1.15em;
+    position: relative;
+  }
+
+  /* --- Navigation --- */
+  .toc {
+    position: sticky;
+    top: 0;
+    background: rgba(13,17,23,0.92);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    z-index: 100;
+    padding: 0;
+    overflow-x: auto;
+  }
+  .toc-inner {
+    max-width: 960px;
+    margin: 0 auto;
+    display: flex;
+    gap: 0;
+    padding: 0 20px;
+  }
+  .toc a {
+    color: var(--text-dim);
+    text-decoration: none;
+    font-size: 0.85em;
+    padding: 12px 16px;
+    white-space: nowrap;
+    border-bottom: 2px solid transparent;
+    transition: all 0.2s;
+  }
+  .toc a:hover {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+    background: rgba(88,166,255,0.05);
+  }
+
+  /* --- Main content --- */
+  .container {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 40px 24px 80px;
+  }
+
+  /* Sections */
+  .section {
+    margin-bottom: 56px;
+  }
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 28px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .section-num {
+    background: linear-gradient(135deg, var(--accent), var(--accent3));
+    color: #fff;
+    font-weight: 700;
+    font-size: 0.8em;
+    padding: 4px 12px;
+    border-radius: 20px;
+    flex-shrink: 0;
+  }
+  .section-header h2 {
+    font-size: 1.65em;
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  h3 {
+    font-size: 1.2em;
+    font-weight: 600;
+    color: var(--accent);
+    margin: 32px 0 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  h3::before {
+    content: '>';
+    color: var(--accent2);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-weight: 400;
+  }
+
+  p { margin: 10px 0; }
+
+  strong { color: var(--accent4); font-weight: 600; }
+
+  /* --- Code blocks --- */
+  pre {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 18px 20px;
+    overflow-x: auto;
+    font-size: 0.88em;
+    line-height: 1.6;
+    margin: 14px 0;
+    position: relative;
+  }
+  pre code {
+    font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', monospace;
+    color: var(--text);
+  }
+  /* inline code */
+  code {
+    font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-size: 0.88em;
+    color: var(--accent6);
+  }
+  pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--text);
+  }
+  /* code language label */
+  pre[data-lang]::before {
+    content: attr(data-lang);
+    position: absolute;
+    top: 8px;
+    right: 12px;
+    font-size: 0.72em;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-family: -apple-system, sans-serif;
+    opacity: 0.7;
+  }
+
+  /* Syntax highlighting */
+  .kw { color: var(--accent5); }      /* keywords */
+  .fn { color: var(--accent3); }      /* function names */
+  .tp { color: var(--accent6); }      /* types */
+  .cm { color: var(--text-dim); font-style: italic; }  /* comments */
+  .st { color: var(--accent2); }      /* strings */
+  .num { color: var(--accent4); }     /* numbers */
+  .pp { color: var(--accent5); }      /* preprocessor */
+  .bi { color: var(--accent4); }      /* built-in vars */
+
+  /* --- Tables --- */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 0.92em;
+  }
+  th {
+    background: var(--bg-code);
+    color: var(--accent);
+    font-weight: 600;
+    text-align: left;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+  }
+  td {
+    padding: 9px 14px;
+    border: 1px solid var(--border);
+  }
+  tr:nth-child(even) td {
+    background: rgba(22,27,34,0.5);
+  }
+
+  /* --- Info / Tip / Warning boxes --- */
+  .box {
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 18px 0;
+    border-left: 4px solid;
+  }
+  .box-info {
+    background: rgba(88,166,255,0.06);
+    border-color: var(--accent);
+  }
+  .box-tip {
+    background: rgba(126,231,135,0.06);
+    border-color: var(--accent2);
+  }
+  .box-warn {
+    background: rgba(255,123,114,0.06);
+    border-color: var(--accent5);
+  }
+  .box-title {
+    font-weight: 600;
+    margin-bottom: 6px;
+    font-size: 0.92em;
+  }
+  .box-info .box-title { color: var(--accent); }
+  .box-tip .box-title { color: var(--accent2); }
+  .box-warn .box-title { color: var(--accent5); }
+
+  /* --- Diagram blocks (ASCII art) --- */
+  .diagram {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin: 16px 0;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.85em;
+    line-height: 1.55;
+    white-space: pre;
+    overflow-x: auto;
+    color: var(--text-dim);
+  }
+  .diagram .hl { color: var(--accent); font-weight: 600; }
+  .diagram .hl2 { color: var(--accent2); }
+  .diagram .hl3 { color: var(--accent3); }
+  .diagram .hl4 { color: var(--accent4); }
+  .diagram .hl5 { color: var(--accent5); }
+
+  /* --- Lists --- */
+  ul, ol { padding-left: 24px; margin: 8px 0; }
+  li { margin: 5px 0; }
+  li::marker { color: var(--accent); }
+
+  /* --- Comparison cards --- */
+  .compare {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin: 18px 0;
+  }
+  @media (max-width: 640px) {
+    .compare { grid-template-columns: 1fr; }
+  }
+  .compare-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 18px;
+  }
+  .compare-card h4 {
+    font-size: 1em;
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .badge-slow {
+    background: rgba(255,123,114,0.15);
+    color: var(--accent5);
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 0.75em;
+    font-weight: 600;
+  }
+  .badge-fast {
+    background: rgba(126,231,135,0.15);
+    color: var(--accent2);
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 0.75em;
+    font-weight: 600;
+  }
+
+  /* separator */
+  hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 48px 0;
+  }
+
+  /* scrollbar */
+  ::-webkit-scrollbar { height: 6px; width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<!-- ========== Hero ========== -->
+<div class="hero">
+  <h1>CUDA 编程入门 & GEMM 实现</h1>
+  <div class="subtitle">从 GPU 架构到朴素 GEMM 再到 Tiling GEMM，一步步理解并行矩阵乘法</div>
+</div>
+
+<!-- ========== TOC ========== -->
+<nav class="toc">
+  <div class="toc-inner">
+    <a href="#s1">一、CUDA 基础</a>
+    <a href="#s1b">热身：Vector 求和</a>
+    <a href="#s2">二、朴素 GEMM</a>
+    <a href="#s3">三、Tiling GEMM</a>
+    <a href="#s4">四、性能对比</a>
+    <a href="#s5">五、编译运行</a>
+    <a href="#s6">六、标准 Attention</a>
+    <a href="#s7">七、Kernel Fusion</a>
+    <a href="#s8">八、Online Softmax</a>
+    <a href="#s9">九、FlashAttention</a>
+    <a href="#s10">十、Flash Decoding</a>
+  </div>
+</nav>
+
+<!-- ========== Content ========== -->
+<div class="container">
+
+<!-- ==================== Section 1 ==================== -->
+<div class="section" id="s1">
+  <div class="section-header">
+    <span class="section-num">01</span>
+    <h2>CUDA 编程基础</h2>
+  </div>
+
+  <h3>1.1 GPU 硬件架构：SM、HBM、SRAM</h3>
+
+  <p>在写 CUDA 代码之前，先理解 GPU 的硬件结构。以 NVIDIA A100 为例：</p>
+
+  <div class="diagram"><span class="hl">GPU（一块显卡）</span>
+┌──────────────────────────────────────────────────────────┐
+│                                                          │
+│  <span class="hl2">SM 0</span>          <span class="hl2">SM 1</span>          <span class="hl2">SM 2</span>    ...   <span class="hl2">SM 107</span>     │
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐     ┌─────────┐ │
+│  │ CUDA核心 │  │ CUDA核心 │  │ CUDA核心 │     │ CUDA核心 │ │
+│  │ (计算单元)│  │ (计算单元)│  │ (计算单元)│     │ (计算单元)│ │
+│  │          │  │          │  │          │     │          │ │
+│  │ <span class="hl3">SRAM</span>    │  │ <span class="hl3">SRAM</span>    │  │ <span class="hl3">SRAM</span>    │     │ <span class="hl3">SRAM</span>    │ │
+│  │ <span class="hl3">192KB</span>   │  │ <span class="hl3">192KB</span>   │  │ <span class="hl3">192KB</span>   │     │ <span class="hl3">192KB</span>   │ │
+│  └─────────┘  └─────────┘  └─────────┘     └─────────┘ │
+│                                                          │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │                  <span class="hl4">HBM（显存）</span>                      │  │
+│  │                  <span class="hl4">80 GB，带宽 2 TB/s</span>              │  │
+│  │            所有 SM 共享，但访问慢（~400 周期）         │  │
+│  └────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────┘</div>
+
+  <table>
+    <tr><th>硬件</th><th>全称</th><th>类比 CPU</th><th>特点</th></tr>
+    <tr>
+      <td><code>SM</code></td>
+      <td>Streaming Multiprocessor</td>
+      <td>CPU 的一个核</td>
+      <td>GPU 的基本计算单元。一个 GPU 有几十~上百个 SM。<strong>一个 block 只能运行在一个 SM 上</strong>，但一个 SM 可以同时运行多个 block。</td>
+    </tr>
+    <tr>
+      <td><code>SRAM</code></td>
+      <td>Static RAM（Shared Memory）</td>
+      <td>CPU 的 L1 Cache</td>
+      <td>每个 SM 私有，<strong>快但小</strong>（~192KB）。访问延迟 ~20 周期。同一 block 内的线程通过它共享数据。</td>
+    </tr>
+    <tr>
+      <td><code>HBM</code></td>
+      <td>High Bandwidth Memory（显存）</td>
+      <td>CPU 的主存 (DRAM)</td>
+      <td>所有 SM 共享，<strong>大但慢</strong>（80GB，但访问延迟 ~400 周期）。数据从 CPU 拷过来就放在这里。</td>
+    </tr>
+  </table>
+
+  <div class="box box-warn">
+    <div class="box-title">性能瓶颈的根源</div>
+    SRAM 比 HBM <strong>快 ~20 倍</strong>，但容量小 3 个数量级。CUDA 优化的核心思路就是：<strong>尽量从 SRAM 读数据，减少 HBM 访问</strong>。后面的 Tiling GEMM 和 FlashAttention 都是这个思路。
+  </div>
+
+  <h3>1.2 编程模型</h3>
+  <p>CUDA 程序 = <strong>Host 代码（CPU）</strong> + <strong>Device 代码（GPU）</strong>。CPU 负责控制流，GPU 负责并行计算。</p>
+
+  <div class="diagram"><span class="hl">CPU（Host）</span>                         <span class="hl3">GPU（Device）</span>
+┌──────────────┐                   ┌──────────────────────┐
+│ 1. 分配显存    │ ──<span class="hl2">cudaMalloc</span>──→  │ 显存（HBM）           │
+│ 2. 拷贝数据    │ ──<span class="hl2">cudaMemcpy</span>──→ │ 数据就位               │
+│ 3. 启动 kernel │ ──<span class="hl2">kernel&lt;&lt;&lt;&gt;&gt;&gt;</span>─→ │ 成千上万线程并行执行     │
+│ 4. 等待完成    │ ←─同步─────────  │ 计算完毕               │
+│ 5. 拷回结果    │ ←─<span class="hl2">cudaMemcpy</span>──  │                       │
+│ 6. 释放显存    │ ──<span class="hl2">cudaFree</span>───→  │                       │
+└──────────────┘                   └──────────────────────┘</div>
+
+  <h3>1.3 线程层次与 Warp</h3>
+  <p>CUDA 的线程组织是四层结构（软件三层 + 硬件一层）：</p>
+
+  <div class="diagram"><span class="hl">Grid</span>（网格）—— 一次 kernel launch 产生一个 grid
+├── <span class="hl2">Block 0</span>（线程块）——  调度到某个 SM 上运行
+│   ├── <span class="hl4">Warp 0</span>（硬件调度单元）—— 32 个线程<span class="hl5">锁步执行</span>
+│   │   ├── <span class="hl3">Thread 0 ~ 31</span>
+│   ├── <span class="hl4">Warp 1</span>
+│   │   ├── <span class="hl3">Thread 32 ~ 63</span>
+│   └── ...
+├── <span class="hl2">Block 1</span>
+│   ├── <span class="hl4">Warp 0</span>
+│   │   ├── <span class="hl3">Thread 0 ~ 31</span>
+│   └── ...
+└── ...</div>
+
+  <ul>
+    <li><strong>Grid</strong>：所有线程块的集合，可以是 1D/2D/3D</li>
+    <li><strong>Block</strong>：一组线程，<strong>同一 block 内的线程共享 SRAM（shared memory）</strong>，可以同步。一个 block 被分配到一个 SM 上运行</li>
+    <li><strong>Warp</strong>：<strong>GPU 真正的执行单位</strong>。硬件自动把 block 内的线程按 32 个一组分成 warp。同一 warp 的 32 个线程<strong>在同一时刻执行相同的指令</strong>（SIMT: Single Instruction, Multiple Threads）</li>
+    <li><strong>Thread</strong>：最小执行单元，每个线程有唯一 ID</li>
+  </ul>
+
+  <h3>1.4 Warp 深入理解</h3>
+
+  <div class="box box-info">
+    <div class="box-title">为什么 block_size 通常是 32 的倍数？</div>
+    因为硬件以 warp（32 线程）为单位调度。如果 block_size = 100，最后一个 warp 只有 4 个活跃线程，其余 28 个空转浪费算力。所以通常选 128、256、512 等 32 的倍数。
+  </div>
+
+  <p>一个 block 有 256 个线程时，硬件会拆成 8 个 warp：</p>
+
+  <div class="diagram"><span class="hl2">Block（256 个线程）</span> 运行在 <span class="hl">SM</span> 上
+┌──────────────────────────────────────────┐
+│ <span class="hl4">Warp 0</span>: thread  0 ~  31  ← 32 个线程锁步 │
+│ <span class="hl4">Warp 1</span>: thread 32 ~  63                  │
+│ <span class="hl4">Warp 2</span>: thread 64 ~  95                  │
+│ <span class="hl4">Warp 3</span>: thread 96 ~ 127                  │
+│ <span class="hl4">Warp 4</span>: thread 128 ~ 159                 │
+│ <span class="hl4">Warp 5</span>: thread 160 ~ 191                 │
+│ <span class="hl4">Warp 6</span>: thread 192 ~ 223                 │
+│ <span class="hl4">Warp 7</span>: thread 224 ~ 255                 │
+└──────────────────────────────────────────┘
+
+SM 的 warp 调度器在这些 warp 之间快速切换：
+  Warp 0 在等 HBM 数据 → 切到 Warp 3 执行计算
+  Warp 3 执行完一条指令 → 切到 Warp 5
+  ...（<span class="hl2">零开销切换</span>，隐藏内存延迟）</div>
+
+  <div class="box box-warn">
+    <div class="box-title">Warp Divergence（分支分歧）</div>
+    同一 warp 的 32 个线程必须执行相同指令。如果代码中有 <code>if-else</code>，部分线程走 if、部分走 else，硬件会<strong>串行执行两个分支</strong>，走 if 时 else 的线程空等，反之亦然。性能最差可能减半。
+  </div>
+
+  <h3>1.5 软件概念 vs 硬件概念</h3>
+
+  <table>
+    <tr><th>层级</th><th>软件/硬件</th><th>你在代码里控制？</th><th>运行在哪？</th></tr>
+    <tr><td>Grid</td><td>软件</td><td>是（<<<grid_size, ...>>>）</td><td>整个 GPU</td></tr>
+    <tr><td>Block</td><td>软件</td><td>是（<<<..., block_size>>>）</td><td>一个 SM</td></tr>
+    <tr><td>Warp</td><td><span style="color:var(--accent5)">硬件</span></td><td><span style="color:var(--accent5)">否，硬件自动按 32 分组</span></td><td>SM 的 warp 调度器</td></tr>
+    <tr><td>Thread</td><td>软件</td><td>是（threadIdx）</td><td>SM 的 CUDA 核心</td></tr>
+  </table>
+
+  <div class="box box-tip">
+    <div class="box-title">一句话总结调度</div>
+    你写代码定义 Grid 和 Block → GPU 把 Block 分配到 SM → SM 把 Block 内线程按 32 个一组分成 Warp → Warp 调度器在多个 Warp 之间快速切换来隐藏延迟。
+  </div>
+
+  <p>线程的全局唯一 ID 计算：</p>
+
+  <pre data-lang="cuda"><code><span class="cm">// 1D 情况</span>
+<span class="tp">int</span> global_id = <span class="bi">blockIdx.x</span> * <span class="bi">blockDim.x</span> + <span class="bi">threadIdx.x</span>;
+
+<span class="cm">// 2D 情况（矩阵计算常用）</span>
+<span class="tp">int</span> row = <span class="bi">blockIdx.y</span> * <span class="bi">blockDim.y</span> + <span class="bi">threadIdx.y</span>;  <span class="cm">// 行</span>
+<span class="tp">int</span> col = <span class="bi">blockIdx.x</span> * <span class="bi">blockDim.x</span> + <span class="bi">threadIdx.x</span>;  <span class="cm">// 列</span></code></pre>
+
+  <h3>1.6 内置变量</h3>
+  <table>
+    <tr><th>变量</th><th>含义</th></tr>
+    <tr><td><code>threadIdx.x/y/z</code></td><td>线程在 block 内的索引</td></tr>
+    <tr><td><code>blockIdx.x/y/z</code></td><td>block 在 grid 内的索引</td></tr>
+    <tr><td><code>blockDim.x/y/z</code></td><td>block 的大小（每个维度有多少线程）</td></tr>
+    <tr><td><code>gridDim.x/y/z</code></td><td>grid 的大小（每个维度有多少 block）</td></tr>
+  </table>
+
+  <h3>1.7 第一个完整 CUDA 程序：数组元素翻倍</h3>
+  <p>把 Kernel 函数和内存管理放在一起，写一个<strong>可直接编译运行</strong>的完整示例。功能：把数组每个元素乘以 2。</p>
+
+  <pre data-lang="cuda"><code><span class="cm">// double_array.cu</span>
+<span class="cm">// 编译: nvcc -o double_array double_array.cu</span>
+<span class="cm">// 运行: ./double_array</span>
+
+<span class="pp">#include &lt;stdio.h&gt;</span>
+<span class="pp">#include &lt;cuda_runtime.h&gt;</span>
+
+<span class="cm">// =============================================</span>
+<span class="cm">// Kernel: 每个线程把一个元素乘以 2</span>
+<span class="cm">// __global__ 修饰 = CPU 调用、GPU 执行</span>
+<span class="cm">// =============================================</span>
+<span class="kw">__global__</span> <span class="tp">void</span> <span class="fn">double_array</span>(<span class="tp">float</span> *data, <span class="tp">int</span> n) {
+    <span class="tp">int</span> idx = <span class="bi">blockIdx.x</span> * <span class="bi">blockDim.x</span> + <span class="bi">threadIdx.x</span>;
+    <span class="kw">if</span> (idx &lt; n) {           <span class="cm">// 边界检查！线程总数可能 > 数据量</span>
+        data[idx] *= <span class="num">2.0f</span>;
+    }
+}
+
+<span class="tp">int</span> <span class="fn">main</span>() {
+    <span class="tp">int</span> n = <span class="num">1024</span>;
+    <span class="tp">size_t</span> size = n * <span class="kw">sizeof</span>(<span class="tp">float</span>);
+
+    <span class="cm">// === 1. CPU 侧：分配内存并初始化 ===</span>
+    <span class="tp">float</span> *h_data = (<span class="tp">float</span> *)<span class="fn">malloc</span>(size);  <span class="cm">// h_ 前缀 = host（CPU）</span>
+    <span class="kw">for</span> (<span class="tp">int</span> i = <span class="num">0</span>; i &lt; n; i++) h_data[i] = (<span class="tp">float</span>)i;  <span class="cm">// [0, 1, 2, ..., 1023]</span>
+
+    <span class="cm">// === 2. GPU 侧：分配显存（HBM）===</span>
+    <span class="tp">float</span> *d_data;                        <span class="cm">// d_ 前缀 = device（GPU）</span>
+    <span class="fn">cudaMalloc</span>(&amp;d_data, size);
+
+    <span class="cm">// === 3. 把数据从 CPU 拷到 GPU ===</span>
+    <span class="fn">cudaMemcpy</span>(d_data, h_data, size, cudaMemcpyHostToDevice);
+
+    <span class="cm">// === 4. 启动 Kernel ===</span>
+    <span class="tp">int</span> block_size = <span class="num">256</span>;                          <span class="cm">// 每个 block 256 个线程（8 个 warp）</span>
+    <span class="tp">int</span> grid_size = (n + block_size - <span class="num">1</span>) / block_size;  <span class="cm">// 向上取整 = 4 个 block</span>
+    <span class="fn">double_array</span>&lt;&lt;&lt;grid_size, block_size&gt;&gt;&gt;(d_data, n);
+    <span class="cm">//           ↑ 4 个 block   ↑ 每个 256 线程   → 共 1024 个线程，刚好覆盖数组</span>
+
+    <span class="cm">// === 5. 把结果从 GPU 拷回 CPU ===</span>
+    <span class="fn">cudaMemcpy</span>(h_data, d_data, size, cudaMemcpyDeviceToHost);
+
+    <span class="cm">// === 6. 验证结果 ===</span>
+    <span class="fn">printf</span>(<span class="st">"h_data[0]   = %.1f (expected 0.0)\n"</span>,   h_data[<span class="num">0</span>]);
+    <span class="fn">printf</span>(<span class="st">"h_data[1]   = %.1f (expected 2.0)\n"</span>,   h_data[<span class="num">1</span>]);
+    <span class="fn">printf</span>(<span class="st">"h_data[100] = %.1f (expected 200.0)\n"</span>, h_data[<span class="num">100</span>]);
+    <span class="fn">printf</span>(<span class="st">"h_data[1023]= %.1f (expected 2046.0)\n"</span>,h_data[<span class="num">1023</span>]);
+
+    <span class="cm">// === 7. 释放内存 ===</span>
+    <span class="fn">cudaFree</span>(d_data);   <span class="cm">// 释放 GPU 显存</span>
+    <span class="fn">free</span>(h_data);       <span class="cm">// 释放 CPU 内存</span>
+    <span class="kw">return</span> <span class="num">0</span>;
+}</code></pre>
+
+  <p>这就是 CUDA 程序的标准套路，<strong>每个程序都是这 7 步</strong>：</p>
+
+  <div class="diagram"><span class="hl">CPU</span>                                    <span class="hl3">GPU</span>
+
+1. malloc (CPU 内存)
+2. cudaMalloc (GPU 显存)             →  <span class="hl3">HBM 分配空间</span>
+3. cudaMemcpy Host→Device            →  <span class="hl3">数据到达 HBM</span>
+4. kernel&lt;&lt;&lt;grid, block&gt;&gt;&gt;()          →  <span class="hl3">线程并行执行</span>
+5. cudaMemcpy Device→Host            ←  <span class="hl3">结果从 HBM 拷回</span>
+6. 验证 / 使用结果
+7. cudaFree + free                   →  <span class="hl3">释放</span></div>
+
+  <h3>1.8 Shared Memory（SRAM）</h3>
+  <p>同一 block 内的线程共享，需手动管理：</p>
+
+  <pre data-lang="cuda"><code><span class="kw">__global__</span> <span class="tp">void</span> <span class="fn">kernel</span>() {
+    <span class="kw">__shared__</span> <span class="tp">float</span> smem[<span class="num">256</span>];          <span class="cm">// 静态分配，编译时大小确定</span>
+
+    smem[<span class="bi">threadIdx.x</span>] = global_data[...];
+    <span class="fn">__syncthreads</span>();                     <span class="cm">// 同步屏障：等所有线程写完再读</span>
+    <span class="cm">// 现在可以安全读其他线程写入的 smem 数据</span>
+}</code></pre>
+
+  <div class="box box-info">
+    <div class="box-title">关键概念</div>
+    <code>__syncthreads()</code> 是<strong>块内同步</strong>——保证同一 block 的所有线程都执行到这一行后才继续。不同 block 之间<strong>无法同步</strong>（这就是为什么 FlashAttention 的每个 block 独立计算自己那部分）。
+  </div>
+
+  <h3>1.9 矩阵在内存中的布局</h3>
+  <p>矩阵是 2D 的，但内存是 1D 的。C/CUDA 默认 <strong>row-major</strong>（行优先）：</p>
+
+  <div class="diagram">矩阵 A (3x4):
+┌─────────────────┐
+│ <span class="hl">a00</span> a01 a02 a03 │  ← 第 0 行
+│ a10 a11 <span class="hl4">a12</span> a13 │  ← 第 1 行
+│ a20 a21 a22 a23 │  ← 第 2 行
+└─────────────────┘
+
+内存中（连续 1D）:
+[<span class="hl">a00</span>, a01, a02, a03, a10, a11, <span class="hl4">a12</span>, a13, a20, a21, a22, a23]
+ ──── 第 0 行 ────  ──── 第 1 行 ────  ──── 第 2 行 ────
+
+访问 A[row][col] = A[row * N_cols + col]
+  例: A[<span class="hl4">1</span>][<span class="hl4">2</span>] = A[1 * 4 + 2] = A[<span class="hl4">6</span>] = <span class="hl4">a12</span></div>
+
+</div>
+
+<hr>
+
+<!-- ==================== Section 1.5: Vector Sum ==================== -->
+<div class="section" id="s1b">
+  <div class="section-header">
+    <span class="section-num">1.5</span>
+    <h2>热身：Vector 求和（Reduction）</h2>
+  </div>
+
+  <p>在进入矩阵乘法之前，先用一个最简单的例子感受 CUDA 并行编程：<strong>把一个长度为 N 的数组所有元素求和</strong>。</p>
+
+  <h3>思路：并行归约（Parallel Reduction）</h3>
+
+  <p>CPU 上求和是一个 for 循环，O(N)。GPU 上可以用<strong>树形归约</strong>：每一轮让一半线程把相邻两个元素加在一起，log₂(N) 轮后得到结果。</p>
+
+  <div class="diagram">原始数据:  [<span class="hl">1</span>  <span class="hl">3</span>  <span class="hl">5</span>  <span class="hl">7</span>  <span class="hl">2</span>  <span class="hl">4</span>  <span class="hl">6</span>  <span class="hl">8</span>]
+
+第 1 轮 (stride=1):  每个偶数位线程把相邻元素加起来
+  thread 0: 1+3=<span class="hl2">4</span>    thread 2: 5+7=<span class="hl2">12</span>   thread 4: 2+4=<span class="hl2">6</span>    thread 6: 6+8=<span class="hl2">14</span>
+  →  [<span class="hl2">4</span>   .  <span class="hl2">12</span>   .   <span class="hl2">6</span>   .  <span class="hl2">14</span>   . ]
+
+第 2 轮 (stride=2):
+  thread 0: 4+12=<span class="hl3">16</span>                  thread 4: 6+14=<span class="hl3">20</span>
+  →  [<span class="hl3">16</span>   .   .   .  <span class="hl3">20</span>   .   .   . ]
+
+第 3 轮 (stride=4):
+  thread 0: 16+20=<span class="hl4">36</span>
+  →  [<span class="hl4">36</span>   .   .   .   .   .   .   . ]    ← <span class="hl4">最终结果！</span></div>
+
+  <h3>完整代码</h3>
+
+  <pre data-lang="cuda"><code><span class="pp">#include &lt;stdio.h&gt;</span>
+<span class="pp">#include &lt;cuda_runtime.h&gt;</span>
+
+<span class="cm">// =============================================</span>
+<span class="cm">// Kernel: 块内并行归约求和</span>
+<span class="cm">// 每个 block 把自己负责的那段数组求和</span>
+<span class="cm">// =============================================</span>
+<span class="kw">__global__</span> <span class="tp">void</span> <span class="fn">block_reduce_sum</span>(<span class="kw">const</span> <span class="tp">float</span> *input, <span class="tp">float</span> *output, <span class="tp">int</span> N) {
+    <span class="kw">__shared__</span> <span class="tp">float</span> smem[<span class="num">256</span>];  <span class="cm">// block 内共享的 SRAM</span>
+
+    <span class="tp">int</span> tid = <span class="bi">threadIdx.x</span>;
+    <span class="tp">int</span> gid = <span class="bi">blockIdx.x</span> * <span class="bi">blockDim.x</span> + <span class="bi">threadIdx.x</span>;
+
+    <span class="cm">// 1. 每个线程从 HBM 搬一个元素到 shared memory</span>
+    smem[tid] = (gid &lt; N) ? input[gid] : <span class="num">0.0f</span>;
+    <span class="fn">__syncthreads</span>();  <span class="cm">// 等所有线程搬完</span>
+
+    <span class="cm">// 2. 树形归约：每轮活跃线程减半</span>
+    <span class="kw">for</span> (<span class="tp">int</span> stride = <span class="bi">blockDim.x</span> / <span class="num">2</span>; stride &gt; <span class="num">0</span>; stride /= <span class="num">2</span>) {
+        <span class="kw">if</span> (tid &lt; stride) {
+            smem[tid] += smem[tid + stride];
+        }
+        <span class="fn">__syncthreads</span>();  <span class="cm">// 每轮都要同步！</span>
+    }
+
+    <span class="cm">// 3. thread 0 持有本 block 的部分和，写到 output</span>
+    <span class="kw">if</span> (tid == <span class="num">0</span>) {
+        output[<span class="bi">blockIdx.x</span>] = smem[<span class="num">0</span>];
+    }
+}
+
+<span class="tp">int</span> <span class="fn">main</span>() {
+    <span class="tp">int</span> N = <span class="num">1024</span>;
+    <span class="tp">int</span> block_size = <span class="num">256</span>;
+    <span class="tp">int</span> grid_size = (N + block_size - <span class="num">1</span>) / block_size;  <span class="cm">// = 4 个 block</span>
+
+    <span class="cm">// --- CPU 侧初始化 ---</span>
+    <span class="tp">float</span> *h_input = (<span class="tp">float</span> *)<span class="fn">malloc</span>(N * <span class="kw">sizeof</span>(<span class="tp">float</span>));
+    <span class="kw">for</span> (<span class="tp">int</span> i = <span class="num">0</span>; i &lt; N; i++) h_input[i] = <span class="num">1.0f</span>;  <span class="cm">// 全 1，预期结果 = 1024</span>
+
+    <span class="cm">// --- GPU 侧分配 ---</span>
+    <span class="tp">float</span> *d_input, *d_partial;
+    <span class="fn">cudaMalloc</span>(&amp;d_input, N * <span class="kw">sizeof</span>(<span class="tp">float</span>));
+    <span class="fn">cudaMalloc</span>(&amp;d_partial, grid_size * <span class="kw">sizeof</span>(<span class="tp">float</span>));
+
+    <span class="fn">cudaMemcpy</span>(d_input, h_input, N * <span class="kw">sizeof</span>(<span class="tp">float</span>), cudaMemcpyHostToDevice);
+
+    <span class="cm">// --- 第一轮：每个 block 归约 256 个元素 → 4 个部分和 ---</span>
+    <span class="fn">block_reduce_sum</span>&lt;&lt;&lt;grid_size, block_size&gt;&gt;&gt;(d_input, d_partial, N);
+
+    <span class="cm">// --- 第二轮：1 个 block 归约 4 个部分和 → 最终结果 ---</span>
+    <span class="tp">float</span> *d_result;
+    <span class="fn">cudaMalloc</span>(&amp;d_result, <span class="kw">sizeof</span>(<span class="tp">float</span>));
+    <span class="fn">block_reduce_sum</span>&lt;&lt;&lt;<span class="num">1</span>, grid_size&gt;&gt;&gt;(d_partial, d_result, grid_size);
+
+    <span class="cm">// --- 拷回并打印 ---</span>
+    <span class="tp">float</span> result;
+    <span class="fn">cudaMemcpy</span>(&amp;result, d_result, <span class="kw">sizeof</span>(<span class="tp">float</span>), cudaMemcpyDeviceToHost);
+    <span class="fn">printf</span>(<span class="st">"Sum = %.1f (expected %.1f)\n"</span>, result, (<span class="tp">float</span>)N);
+
+    <span class="fn">cudaFree</span>(d_input); <span class="fn">cudaFree</span>(d_partial); <span class="fn">cudaFree</span>(d_result);
+    <span class="fn">free</span>(h_input);
+    <span class="kw">return</span> <span class="num">0</span>;
+}</code></pre>
+
+  <h3>为什么要两轮 kernel？</h3>
+
+  <div class="box box-info">
+    <div class="box-title">跨 block 无法同步</div>
+    <code>__syncthreads()</code> 只能同步<strong>同一 block 内</strong>的线程。不同 block 之间无法协调，所以第一轮每个 block 各自归约出一个部分和，再启动第二轮 kernel 把这些部分和归约到最终结果。
+  </div>
+
+  <div class="diagram">第一轮 kernel:  <span class="hl">4 个 block</span>，每个 block 256 个线程
+  Block 0: input[0..255]   → <span class="hl2">partial[0] = 256</span>
+  Block 1: input[256..511] → <span class="hl2">partial[1] = 256</span>
+  Block 2: input[512..767] → <span class="hl2">partial[2] = 256</span>
+  Block 3: input[768..1023]→ <span class="hl2">partial[3] = 256</span>
+
+第二轮 kernel:  <span class="hl">1 个 block</span>，4 个线程
+  Block 0: partial[0..3]   → <span class="hl4">result = 1024</span></div>
+
+  <h3>关键要点</h3>
+
+  <ul>
+    <li><strong>Shared memory</strong>：block 内 256 个线程共享 smem[]，避免反复访问 HBM</li>
+    <li><strong>__syncthreads()</strong>：每轮归约后必须同步，否则快线程会读到慢线程还没更新的值</li>
+    <li><strong>stride 减半</strong>：第一轮 128 个线程活跃，第二轮 64 个……最后只剩 thread 0</li>
+    <li><strong>两轮 kernel</strong>：因为跨 block 无法同步，必须分两次启动</li>
+  </ul>
+
+  <div class="box box-tip">
+    <div class="box-title">与 GEMM 的联系</div>
+    Vector sum 展示了 CUDA 的核心套路：<strong>HBM → shared memory → 并行计算 → 写回</strong>。接下来的 GEMM 用的是完全相同的模式，只是每个线程做的不是加法而是内积。
+  </div>
+
+</div>
+
+<hr>
+
+<!-- ==================== Section 2 ==================== -->
+<div class="section" id="s2">
+  <div class="section-header">
+    <span class="section-num">02</span>
+    <h2>朴素 GEMM（Naive GEMM）</h2>
+  </div>
+
+  <div class="box box-info">
+    <div class="box-title">GEMM 是什么？</div>
+    GEMM = <strong>GE</strong>neral <strong>M</strong>atrix <strong>M</strong>ultiply（通用矩阵乘法），是 BLAS（Basic Linear Algebra Subprograms）中的 Level 3 操作。完整定义是 <code>C = &alpha; &middot; A &times; B + &beta; &middot; C</code>，本文简化为 &alpha;=1, &beta;=0 的情况，即 <strong>C = A &times; B</strong>。
+  </div>
+
+  <h3>2.1 思路</h3>
+  <p>C = A x B，其中 A: (M, K)，B: (K, N)，C: (M, N)。</p>
+  <p><strong>每个线程计算 C 的一个元素</strong>——即 A 的一行和 B 的一列的内积：</p>
+
+  <pre><code>C[row][col] = &Sigma;<sub>k</sub> A[row][k] * B[k][col]</code></pre>
+
+  <p>线程 (row, col) 负责 C[row][col]，独立从 HBM 读 A 的第 row 行和 B 的第 col 列，做 K 次乘加。</p>
+
+  <div class="diagram">线程 (1,2) 负责 C[1][2]:
+
+A:                    B:                    C:
+     k=0 k=1 k=2         col=2                 col=2
+      ↓   ↓   ↓           ↓                     ↓
+row=1 [<span class="hl">a</span>  <span class="hl2">b</span>  <span class="hl3">c</span>]  x  [ .  .  <span class="hl">x</span> ]       →   [  .  .  <span class="hl4">?</span>  ]
+                     [ .  .  <span class="hl2">y</span> ]            row=1
+                     [ .  .  <span class="hl3">z</span> ]
+
+C[1][2] = <span class="hl">a</span>*<span class="hl">x</span> + <span class="hl2">b</span>*<span class="hl2">y</span> + <span class="hl3">c</span>*<span class="hl3">z</span></div>
+
+  <h3>2.2 完整代码</h3>
+
+  <pre data-lang="cuda"><code><span class="cm">// naive_gemm.cu</span>
+
+<span class="pp">#include &lt;stdio.h&gt;</span>
+<span class="pp">#include &lt;stdlib.h&gt;</span>
+<span class="pp">#include &lt;cuda_runtime.h&gt;</span>
+
+<span class="cm">// =============================================</span>
+<span class="cm">// Kernel: 朴素 GEMM</span>
+<span class="cm">// 每个线程计算 C 的一个元素</span>
+<span class="cm">// =============================================</span>
+<span class="kw">__global__</span> <span class="tp">void</span> <span class="fn">naive_gemm</span>(<span class="kw">const</span> <span class="tp">float</span> *A, <span class="kw">const</span> <span class="tp">float</span> *B, <span class="tp">float</span> *C,
+                           <span class="tp">int</span> M, <span class="tp">int</span> K, <span class="tp">int</span> N) {
+    <span class="cm">// 当前线程负责 C 的哪个元素</span>
+    <span class="tp">int</span> row = <span class="bi">blockIdx.y</span> * <span class="bi">blockDim.y</span> + <span class="bi">threadIdx.y</span>;  <span class="cm">// 行</span>
+    <span class="tp">int</span> col = <span class="bi">blockIdx.x</span> * <span class="bi">blockDim.x</span> + <span class="bi">threadIdx.x</span>;  <span class="cm">// 列</span>
+
+    <span class="kw">if</span> (row &lt; M &amp;&amp; col &lt; N) {
+        <span class="tp">float</span> sum = <span class="num">0.0f</span>;
+        <span class="kw">for</span> (<span class="tp">int</span> k = <span class="num">0</span>; k &lt; K; k++) {
+            sum += A[row * K + k] * B[k * N + col];
+            <span class="cm">//      A[row][k]        B[k][col]</span>
+        }
+        C[row * N + col] = sum;
+    }
+}
+
+<span class="cm">// =============================================</span>
+<span class="cm">// Host 代码</span>
+<span class="cm">// =============================================</span>
+<span class="tp">void</span> <span class="fn">run_naive_gemm</span>(<span class="tp">int</span> M, <span class="tp">int</span> K, <span class="tp">int</span> N) {
+    <span class="cm">// --- 1. 在 CPU 上分配并初始化矩阵 ---</span>
+    <span class="tp">size_t</span> size_A = M * K * <span class="kw">sizeof</span>(<span class="tp">float</span>);
+    <span class="tp">size_t</span> size_B = K * N * <span class="kw">sizeof</span>(<span class="tp">float</span>);
+    <span class="tp">size_t</span> size_C = M * N * <span class="kw">sizeof</span>(<span class="tp">float</span>);
+
+    <span class="tp">float</span> *h_A = (<span class="tp">float</span> *)<span class="fn">malloc</span>(size_A);
+    <span class="tp">float</span> *h_B = (<span class="tp">float</span> *)<span class="fn">malloc</span>(size_B);
+    <span class="tp">float</span> *h_C = (<span class="tp">float</span> *)<span class="fn">malloc</span>(size_C);
+
+    <span class="cm">// 简单初始化</span>
+    <span class="kw">for</span> (<span class="tp">int</span> i = <span class="num">0</span>; i &lt; M * K; i++) h_A[i] = (<span class="tp">float</span>)(<span class="fn">rand</span>() % <span class="num">10</span>);
+    <span class="kw">for</span> (<span class="tp">int</span> i = <span class="num">0</span>; i &lt; K * N; i++) h_B[i] = (<span class="tp">float</span>)(<span class="fn">rand</span>() % <span class="num">10</span>);
+
+    <span class="cm">// --- 2. 在 GPU 上分配显存 ---</span>
+    <span class="tp">float</span> *d_A, *d_B, *d_C;
+    <span class="fn">cudaMalloc</span>(&amp;d_A, size_A);
+    <span class="fn">cudaMalloc</span>(&amp;d_B, size_B);
+    <span class="fn">cudaMalloc</span>(&amp;d_C, size_C);
+
+    <span class="cm">// --- 3. 拷贝数据 CPU → GPU ---</span>
+    <span class="fn">cudaMemcpy</span>(d_A, h_A, size_A, cudaMemcpyHostToDevice);
+    <span class="fn">cudaMemcpy</span>(d_B, h_B, size_B, cudaMemcpyHostToDevice);
+
+    <span class="cm">// --- 4. 配置并启动 kernel ---</span>
+    <span class="tp">dim3</span> block_size(<span class="num">16</span>, <span class="num">16</span>);  <span class="cm">// 每个 block 16x16 = 256 个线程</span>
+    <span class="tp">dim3</span> grid_size((N + block_size.x - <span class="num">1</span>) / block_size.x,
+                   (M + block_size.y - <span class="num">1</span>) / block_size.y);
+
+    <span class="fn">naive_gemm</span>&lt;&lt;&lt;grid_size, block_size&gt;&gt;&gt;(d_A, d_B, d_C, M, K, N);
+
+    <span class="cm">// --- 5. 拷回结果 GPU → CPU ---</span>
+    <span class="fn">cudaMemcpy</span>(h_C, d_C, size_C, cudaMemcpyDeviceToHost);
+
+    <span class="cm">// --- 6. 验证（打印左上角 4x4）---</span>
+    <span class="fn">printf</span>(<span class="st">"C[0:4][0:4] =\n"</span>);
+    <span class="kw">for</span> (<span class="tp">int</span> i = <span class="num">0</span>; i &lt; <span class="num">4</span> &amp;&amp; i &lt; M; i++) {
+        <span class="kw">for</span> (<span class="tp">int</span> j = <span class="num">0</span>; j &lt; <span class="num">4</span> &amp;&amp; j &lt; N; j++)
+            <span class="fn">printf</span>(<span class="st">"%8.1f "</span>, h_C[i * N + j]);
+        <span class="fn">printf</span>(<span class="st">"\n"</span>);
+    }
+
+    <span class="cm">// --- 7. 清理 ---</span>
+    <span class="fn">cudaFree</span>(d_A); <span class="fn">cudaFree</span>(d_B); <span class="fn">cudaFree</span>(d_C);
+    <span class="fn">free</span>(h_A); <span class="fn">free</span>(h_B); <span class="fn">free</span>(h_C);
+}
+
+<span class="tp">int</span> <span class="fn">main</span>() {
+    <span class="tp">int</span> M = <span class="num">1024</span>, K = <span class="num">512</span>, N = <span class="num">768</span>;
+    <span class="fn">printf</span>(<span class="st">"Naive GEMM: (%d x %d) x (%d x %d)\n"</span>, M, K, K, N);
+    <span class="fn">run_naive_gemm</span>(M, K, N);
+    <span class="kw">return</span> <span class="num">0</span>;
+}</code></pre>
+
+  <h3>2.3 性能分析：为什么慢</h3>
+
+  <div class="diagram">线程 (row=0, col=0): 从 HBM 读 A 的第 0 行（<span class="hl5">K 个元素</span>）+ B 的第 0 列（<span class="hl5">K 个元素</span>）
+线程 (row=0, col=1): 从 HBM 读 A 的第 0 行（<span class="hl5">K 个元素</span>）+ B 的第 1 列（<span class="hl5">K 个元素</span>）
+线程 (row=0, col=2): 从 HBM 读 A 的第 0 行（<span class="hl5">K 个元素</span>）+ B 的第 2 列（<span class="hl5">K 个元素</span>）
+...
+
+<span class="hl5">A 的第 0 行被 N 个线程各读了一次</span>，B 的第 0 列被 M 个线程各读了一次。
+没有数据复用，全靠 HBM 带宽硬扛。
+
+HBM 总读取量 = 每个线程读 2K 个元素 x M*N 个线程 = <span class="hl5">2 * M * N * K</span></div>
+
+</div>
+
+<hr>
+
+<!-- ==================== Section 3 ==================== -->
+<div class="section" id="s3">
+  <div class="section-header">
+    <span class="section-num">03</span>
+    <h2>Tiling GEMM（分块 GEMM）</h2>
+  </div>
+
+  <h3>3.1 核心思想</h3>
+  <p>利用 <strong>shared memory（SRAM）</strong> 实现数据复用：</p>
+  <ol>
+    <li>把 C 矩阵分成 TILE x TILE 的小块，<strong>每个 block 负责一个 C 块</strong></li>
+    <li>沿 K 维度分段，每段加载一个 A tile 和一个 B tile 到 shared memory</li>
+    <li>block 内所有线程<strong>共享这份数据</strong>，完成小矩阵乘法后累加</li>
+    <li>遍历完所有 K 段后，写回结果</li>
+  </ol>
+
+  <div class="diagram">                K 维度方向 →
+           ┌────┬────┬────┬────┐
+       A:  │ <span class="hl">A0</span> │ <span class="hl2">A1</span> │ <span class="hl3">A2</span> │ <span class="hl4">A3</span> │  ← 第 row_block 行的 tile
+           └────┴────┴────┴────┘
+                                    对每个 k_step:
+           ┌────┐                     从 HBM 加载 A_tile 和 B_tile 到 SRAM
+       B:  │ <span class="hl">B0</span> │  ← 第 col_block 列    在 SRAM 中做小矩阵乘法
+           ├────┤    的 tile              累加到 C_tile
+           │ <span class="hl2">B1</span> │
+           ├────┤                   C_tile = <span class="hl">A0*B0</span> + <span class="hl2">A1*B1</span> + <span class="hl3">A2*B2</span> + <span class="hl4">A3*B3</span>
+           │ <span class="hl3">B2</span> │
+           ├────┤
+           │ <span class="hl4">B3</span> │
+           └────┘</div>
+
+  <h3>3.2 详细图解</h3>
+  <p>以 TILE=16 为例，block(1,2) 负责 C[16:32, 32:48] 这个 16x16 的子矩阵：</p>
+
+  <div class="diagram">K = 64，分成 64/16 = 4 段
+
+<span class="hl">Step 0</span> (k=0..15):
+  A_tile = A[16:32, 0:16]    ← 从 HBM 加载到 shared memory
+  B_tile = B[0:16, 32:48]    ← 从 HBM 加载到 shared memory
+  <span class="hl2">__syncthreads()</span>             ← 等所有线程加载完毕
+  C_tile += A_tile x B_tile   ← 在 SRAM 中计算
+  <span class="hl2">__syncthreads()</span>             ← 等所有线程计算完再加载下一块
+
+<span class="hl">Step 1</span> (k=16..31):
+  A_tile = A[16:32, 16:32]
+  B_tile = B[16:32, 32:48]
+  C_tile += A_tile x B_tile
+
+<span class="hl">Step 2</span> (k=32..47): ...
+<span class="hl">Step 3</span> (k=48..63): ...
+
+写回: C[16:32, 32:48] = C_tile</div>
+
+  <h3>3.3 数据复用分析</h3>
+
+  <div class="compare">
+    <div class="compare-card">
+      <h4>朴素 GEMM <span class="badge-slow">SLOW</span></h4>
+      <p>block 内 16x16 = 256 个线程</p>
+      <p>每个线程独立读 A 的一行（K 个元素）</p>
+      <p>同一行被 16 个线程各读一次</p>
+      <p>HBM 读取: <strong>256 x 2K = 512K</strong></p>
+    </div>
+    <div class="compare-card">
+      <h4>Tiling GEMM <span class="badge-fast">FAST</span></h4>
+      <p>每个 k_step，block 协作加载：</p>
+      <p>A_tile: 16x16 = 256 个元素</p>
+      <p>B_tile: 16x16 = 256 个元素</p>
+      <p>共 K/16 步，总 HBM 读取: <strong>32K</strong></p>
+    </div>
+  </div>
+
+  <div class="box box-tip">
+    <div class="box-title">节省倍数</div>
+    512K / 32K = <strong>16 = TILE</strong>。A_tile 加载 1 次，被 16 列的线程共享；B_tile 加载 1 次，被 16 行的线程共享。数据复用 TILE 倍。
+  </div>
+
+  <h3>3.4 完整代码</h3>
+
+  <pre data-lang="cuda"><code><span class="cm">// tiling_gemm.cu</span>
+
+<span class="pp">#include &lt;stdio.h&gt;</span>
+<span class="pp">#include &lt;stdlib.h&gt;</span>
+<span class="pp">#include &lt;cuda_runtime.h&gt;</span>
+
+<span class="pp">#define TILE 16</span>
+
+<span class="cm">// =============================================</span>
+<span class="cm">// Kernel: Tiling GEMM</span>
+<span class="cm">// 每个 block 计算 C 的一个 TILE x TILE 块</span>
+<span class="cm">// =============================================</span>
+<span class="kw">__global__</span> <span class="tp">void</span> <span class="fn">tiling_gemm</span>(<span class="kw">const</span> <span class="tp">float</span> *A, <span class="kw">const</span> <span class="tp">float</span> *B, <span class="tp">float</span> *C,
+                            <span class="tp">int</span> M, <span class="tp">int</span> K, <span class="tp">int</span> N) {
+    <span class="cm">// --- 分配 shared memory ---</span>
+    <span class="kw">__shared__</span> <span class="tp">float</span> As[TILE][TILE];  <span class="cm">// A 的 tile</span>
+    <span class="kw">__shared__</span> <span class="tp">float</span> Bs[TILE][TILE];  <span class="cm">// B 的 tile</span>
+
+    <span class="cm">// 当前线程在 block 内的位置</span>
+    <span class="tp">int</span> tx = <span class="bi">threadIdx.x</span>;  <span class="cm">// 列</span>
+    <span class="tp">int</span> ty = <span class="bi">threadIdx.y</span>;  <span class="cm">// 行</span>
+
+    <span class="cm">// 当前线程负责的 C 元素的全局位置</span>
+    <span class="tp">int</span> row = <span class="bi">blockIdx.y</span> * TILE + ty;
+    <span class="tp">int</span> col = <span class="bi">blockIdx.x</span> * TILE + tx;
+
+    <span class="tp">float</span> sum = <span class="num">0.0f</span>;
+
+    <span class="cm">// --- 沿 K 维度分段遍历 ---</span>
+    <span class="kw">for</span> (<span class="tp">int</span> k_step = <span class="num">0</span>; k_step &lt; K; k_step += TILE) {
+        <span class="cm">// 协作加载：每个线程搬一个元素到 shared memory</span>
+        <span class="cm">// 256 个线程，刚好搬 16x16 = 256 个元素</span>
+        <span class="kw">if</span> (row &lt; M &amp;&amp; (k_step + tx) &lt; K) {
+            As[ty][tx] = A[row * K + k_step + tx];
+        } <span class="kw">else</span> {
+            As[ty][tx] = <span class="num">0.0f</span>;  <span class="cm">// 越界补零</span>
+        }
+
+        <span class="kw">if</span> ((k_step + ty) &lt; K &amp;&amp; col &lt; N) {
+            Bs[ty][tx] = B[(k_step + ty) * N + col];
+        } <span class="kw">else</span> {
+            Bs[ty][tx] = <span class="num">0.0f</span>;
+        }
+
+        <span class="cm">// 同步：确保 tile 加载完毕</span>
+        <span class="fn">__syncthreads</span>();
+
+        <span class="cm">// 在 shared memory 中做小矩阵乘法</span>
+        <span class="kw">for</span> (<span class="tp">int</span> k = <span class="num">0</span>; k &lt; TILE; k++) {
+            sum += As[ty][k] * Bs[k][tx];
+            <span class="cm">//     ↑ 同一行线程共享 As 同一行（A 的复用）</span>
+            <span class="cm">//              ↑ 同一列线程共享 Bs 同一列（B 的复用）</span>
+        }
+
+        <span class="cm">// 同步：确保所有线程用完当前 tile 后再加载下一个</span>
+        <span class="fn">__syncthreads</span>();
+    }
+
+    <span class="cm">// 写回结果</span>
+    <span class="kw">if</span> (row &lt; M &amp;&amp; col &lt; N) {
+        C[row * N + col] = sum;
+    }
+}
+
+<span class="cm">// =============================================</span>
+<span class="cm">// Host 代码</span>
+<span class="cm">// =============================================</span>
+<span class="tp">void</span> <span class="fn">run_tiling_gemm</span>(<span class="tp">int</span> M, <span class="tp">int</span> K, <span class="tp">int</span> N) {
+    <span class="tp">size_t</span> size_A = M * K * <span class="kw">sizeof</span>(<span class="tp">float</span>);
+    <span class="tp">size_t</span> size_B = K * N * <span class="kw">sizeof</span>(<span class="tp">float</span>);
+    <span class="tp">size_t</span> size_C = M * N * <span class="kw">sizeof</span>(<span class="tp">float</span>);
+
+    <span class="tp">float</span> *h_A = (<span class="tp">float</span> *)<span class="fn">malloc</span>(size_A);
+    <span class="tp">float</span> *h_B = (<span class="tp">float</span> *)<span class="fn">malloc</span>(size_B);
+    <span class="tp">float</span> *h_C = (<span class="tp">float</span> *)<span class="fn">malloc</span>(size_C);
+
+    <span class="kw">for</span> (<span class="tp">int</span> i = <span class="num">0</span>; i &lt; M * K; i++) h_A[i] = (<span class="tp">float</span>)(<span class="fn">rand</span>() % <span class="num">10</span>);
+    <span class="kw">for</span> (<span class="tp">int</span> i = <span class="num">0</span>; i &lt; K * N; i++) h_B[i] = (<span class="tp">float</span>)(<span class="fn">rand</span>() % <span class="num">10</span>);
+
+    <span class="tp">float</span> *d_A, *d_B, *d_C;
+    <span class="fn">cudaMalloc</span>(&amp;d_A, size_A);
+    <span class="fn">cudaMalloc</span>(&amp;d_B, size_B);
+    <span class="fn">cudaMalloc</span>(&amp;d_C, size_C);
+
+    <span class="fn">cudaMemcpy</span>(d_A, h_A, size_A, cudaMemcpyHostToDevice);
+    <span class="fn">cudaMemcpy</span>(d_B, h_B, size_B, cudaMemcpyHostToDevice);
+
+    <span class="tp">dim3</span> block_size(TILE, TILE);
+    <span class="tp">dim3</span> grid_size((N + TILE - <span class="num">1</span>) / TILE,
+                   (M + TILE - <span class="num">1</span>) / TILE);
+
+    <span class="fn">tiling_gemm</span>&lt;&lt;&lt;grid_size, block_size&gt;&gt;&gt;(d_A, d_B, d_C, M, K, N);
+
+    <span class="fn">cudaMemcpy</span>(h_C, d_C, size_C, cudaMemcpyDeviceToHost);
+
+    <span class="fn">printf</span>(<span class="st">"C[0:4][0:4] =\n"</span>);
+    <span class="kw">for</span> (<span class="tp">int</span> i = <span class="num">0</span>; i &lt; <span class="num">4</span> &amp;&amp; i &lt; M; i++) {
+        <span class="kw">for</span> (<span class="tp">int</span> j = <span class="num">0</span>; j &lt; <span class="num">4</span> &amp;&amp; j &lt; N; j++)
+            <span class="fn">printf</span>(<span class="st">"%8.1f "</span>, h_C[i * N + j]);
+        <span class="fn">printf</span>(<span class="st">"\n"</span>);
+    }
+
+    <span class="fn">cudaFree</span>(d_A); <span class="fn">cudaFree</span>(d_B); <span class="fn">cudaFree</span>(d_C);
+    <span class="fn">free</span>(h_A); <span class="fn">free</span>(h_B); <span class="fn">free</span>(h_C);
+}
+
+<span class="tp">int</span> <span class="fn">main</span>() {
+    <span class="tp">int</span> M = <span class="num">1024</span>, K = <span class="num">512</span>, N = <span class="num">768</span>;
+    <span class="fn">printf</span>(<span class="st">"Tiling GEMM (TILE=%d): (%d x %d) x (%d x %d)\n"</span>, TILE, M, K, K, N);
+    <span class="fn">run_tiling_gemm</span>(M, K, N);
+    <span class="kw">return</span> <span class="num">0</span>;
+}</code></pre>
+
+  <h3>3.5 两次 __syncthreads() 的必要性</h3>
+
+  <pre data-lang="cuda"><code><span class="kw">for</span> (<span class="tp">int</span> k_step = <span class="num">0</span>; k_step &lt; K; k_step += TILE) {
+    <span class="cm">// 加载到 shared memory</span>
+    As[ty][tx] = A[...];
+    Bs[ty][tx] = B[...];
+
+    <span class="fn">__syncthreads</span>();    <span class="cm">// ① 加载屏障：等所有线程写完 shared memory</span>
+
+    <span class="kw">for</span> (<span class="tp">int</span> k = <span class="num">0</span>; k &lt; TILE; k++)
+        sum += As[ty][k] * Bs[k][tx];  <span class="cm">// 读其他线程写入的数据</span>
+
+    <span class="fn">__syncthreads</span>();    <span class="cm">// ② 计算屏障：等所有线程用完当前 tile</span>
+}</code></pre>
+
+  <div class="box box-warn">
+    <div class="box-title">屏障 &numero;1 — 加载屏障</div>
+    线程 A 可能还没写完 <code>As[3][5]</code>，线程 B 就去读了——读到旧值或未初始化值。
+  </div>
+
+  <div class="box box-warn">
+    <div class="box-title">屏障 &numero;2 — 计算屏障</div>
+    快线程进入下一轮循环，开始写新的 <code>As[ty][tx]</code>，而慢线程还在用旧的 <code>As[ty][k]</code> 做内积——数据被覆盖，结果错误。
+  </div>
+
+  <div class="diagram">时间线（<span class="hl5">无屏障 ② 的错误情况</span>）:
+  快线程:  加载 step0 → 计算 step0 → <span class="hl5">加载 step1（覆盖 As！）</span>
+  慢线程:  加载 step0 → 计算 step0（<span class="hl5">还在读 As，但已被覆盖</span>）→ 💥</div>
+
+</div>
+
+<hr>
+
+<!-- ==================== Section 4 ==================== -->
+<div class="section" id="s4">
+  <div class="section-header">
+    <span class="section-num">04</span>
+    <h2>性能对比</h2>
+  </div>
+
+  <h3>4.1 HBM 读取量</h3>
+
+  <table>
+    <tr><th></th><th>朴素 GEMM</th><th>Tiling GEMM</th></tr>
+    <tr><td>每个线程从 HBM 读</td><td>2K</td><td>-</td></tr>
+    <tr><td>每个 block 从 HBM 读</td><td>256 x 2K = 512K</td><td>(K/TILE) x 2 x TILE&sup2; = 2*K*TILE</td></tr>
+    <tr><td>总 HBM 读取</td><td>2*M*N*K</td><td>2*M*N*K / TILE</td></tr>
+    <tr><td>M=1024, K=512, N=768, TILE=16</td><td style="color:var(--accent5)">~800M 次</td><td style="color:var(--accent2)">~50M 次</td></tr>
+    <tr><td>节省</td><td>-</td><td style="color:var(--accent2);font-weight:bold">TILE = 16 倍</td></tr>
+  </table>
+
+  <h3>4.2 为什么跨 block 没有复用</h3>
+  <p>不同 block 运行在不同 SM 上，shared memory 不共享：</p>
+
+  <div class="diagram">Block(0,0) 在 SM 0: 加载 B_tile = B[0:16, 0:16]
+Block(1,0) 在 SM 3: 也要加载 B_tile = B[0:16, 0:16]  ← <span class="hl5">同样的数据，重复加载</span>
+
+但 block 内 16 行线程共享这个 B_tile → <span class="hl2">省了 16 倍</span></div>
+
+  <div class="box box-info">
+    <div class="box-title">与 FlashAttention 的联系</div>
+    这和 flashattention.md 中讲的 tiling 思路完全一致——SRAM 只在 block 内复用，跨 block 没有复用。
+  </div>
+
+</div>
+
+<hr>
+
+<!-- ==================== Section 5 ==================== -->
+<div class="section" id="s5">
+  <div class="section-header">
+    <span class="section-num">05</span>
+    <h2>编译和运行</h2>
+  </div>
+
+  <pre data-lang="bash"><code><span class="cm"># 编译</span>
+nvcc -o naive_gemm naive_gemm.cu
+nvcc -o tiling_gemm tiling_gemm.cu
+
+<span class="cm"># 运行</span>
+./naive_gemm
+./tiling_gemm
+
+<span class="cm"># 性能分析（用 nsight 或 nvprof）</span>
+nsys profile ./naive_gemm
+nsys profile ./tiling_gemm</code></pre>
+
+</div>
+
+<hr>
+
+<!-- ==================== Section 6 ==================== -->
+<div class="section" id="s6">
+  <div class="section-header">
+    <span class="section-num">06</span>
+    <h2>标准 Attention 的问题</h2>
+  </div>
+
+  <p>标准 Attention 公式：<code>O = softmax(Q &middot; K<sup>T</sup> / &radic;d) &middot; V</code>，在 PyTorch 中通常拆成 3 个独立 kernel：</p>
+
+  <pre data-lang="python"><code>S = Q @ K.T          <span class="cm"># kernel 1: 矩阵乘法（cuBLAS GEMM）</span>
+P = torch.softmax(S) <span class="cm"># kernel 2: softmax</span>
+O = P @ V            <span class="cm"># kernel 3: 矩阵乘法</span></code></pre>
+
+  <h3>6.1 为什么慢：Kernel 间的 HBM 往返</h3>
+
+  <p>每个 kernel 独立调度，<strong>kernel 之间无法共享 SRAM</strong>——SRAM 绑定在线程块上，kernel 结束时线程块销毁，SRAM 随之释放。</p>
+
+  <div class="diagram"><span class="hl5">3 个 Kernel（标准 Attention）</span>:
+  HBM → SRAM → 算 S → <span class="hl5">写回 HBM</span> → SRAM → softmax → <span class="hl5">写回 HBM</span> → SRAM → 乘 V → HBM
+                        ↑ 中间矩阵 S              ↑ 中间矩阵 P
+                        <span class="hl5">O(N²) 显存</span>               <span class="hl5">O(N²) 显存</span></div>
+
+  <div class="box box-warn">
+    <div class="box-title">为什么中间结果必须写回 HBM？</div>
+    SRAM 就像函数的局部变量——函数返回后栈空间就释放了。Kernel 1 结束后 S 矩阵在 SRAM 中的数据就丢了，Kernel 2 必须从 HBM 重新读取。<strong>不是因为想存，而是不存就丢了。</strong>
+  </div>
+
+  <div class="diagram"><span class="hl">Kernel 的生命周期</span>:
+
+Kernel 1 启动 → 分配线程块到各 SM → 每个线程块获得一块 SRAM
+                                      ↓
+                                   计算完毕，结果写入 HBM
+                                      ↓
+Kernel 1 结束 → 线程块销毁 → <span class="hl5">SRAM 释放（数据丢失）</span>
+                                      ↓
+Kernel 2 启动 → 分配新的线程块 → 获得全新的 SRAM → 从 HBM 重新读数据</div>
+
+  <h3>6.2 Compute-bound vs Memory-bound</h3>
+
+  <table>
+    <tr><th>类型</th><th>瓶颈</th><th>典型操作</th></tr>
+    <tr><td>Compute-bound</td><td>算力（FLOPs）</td><td>大矩阵乘法、大卷积</td></tr>
+    <tr><td>Memory-bound</td><td>带宽（HBM 读写）</td><td>softmax、dropout、LayerNorm 等逐元素操作</td></tr>
+  </table>
+
+  <p>Attention 中的 softmax、masking、dropout 都是 <strong>memory-bound</strong>——计算量很小，但每个元素都要从 HBM 读一次、写一次。这意味着<strong>减少 HBM 访问次数比减少 FLOPs 更重要</strong>。</p>
+
+  <h3>6.3 标准 Attention 的开销</h3>
+
+  <table>
+    <tr><th>项目</th><th>值</th></tr>
+    <tr><td>额外显存</td><td>O(N&sup2;)（存 S 和 P 两个 N&times;N 矩阵）</td></tr>
+    <tr><td>HBM IO</td><td>O(N&sup2; + Nd)（主要是读写 S、P 各一次）</td></tr>
+    <tr><td>计算量</td><td>O(N&sup2;d)</td></tr>
+  </table>
+
+  <p>N 大时，O(N&sup2;) 的 S、P 矩阵占满显存，且读写它们成为 IO 瓶颈。</p>
+
+</div>
+
+<hr>
+
+<!-- ==================== Section 7 ==================== -->
+<div class="section" id="s7">
+  <div class="section-header">
+    <span class="section-num">07</span>
+    <h2>Kernel Fusion（算子融合）</h2>
+  </div>
+
+  <p>解决 memory-bound 问题的标准思路：把多个操作融合成一个 kernel，数据在 SRAM 上流转，避免反复写回/读取 HBM。</p>
+
+  <div class="compare">
+    <div class="compare-card">
+      <h4>不融合 <span class="badge-slow">3 个 Kernel</span></h4>
+      <p>HBM → 算 S → <strong>写回 HBM</strong></p>
+      <p>HBM → softmax → <strong>写回 HBM</strong></p>
+      <p>HBM → 乘 V → HBM</p>
+      <p style="color:var(--accent5)">中间结果反复落地 HBM</p>
+    </div>
+    <div class="compare-card">
+      <h4>融合 <span class="badge-fast">1 个 Kernel</span></h4>
+      <p>HBM → SRAM</p>
+      <p>算 S → softmax → 乘 V</p>
+      <p><strong>全在 SRAM 上完成</strong></p>
+      <p>→ HBM</p>
+      <p style="color:var(--accent2)">中间不碰 HBM</p>
+    </div>
+  </div>
+
+  <p>FlashAttention 本质上就是一个<strong>手写的融合 CUDA kernel</strong>，把 attention 的全部操作（matmul + mask + softmax + dropout + matmul）融合在一起，配合 tiling 让数据块刚好放进 SRAM。</p>
+
+</div>
+
+<hr>
+
+<!-- ==================== Section 8 ==================== -->
+<div class="section" id="s8">
+  <div class="section-header">
+    <span class="section-num">08</span>
+    <h2>Online Softmax</h2>
+  </div>
+
+  <p>融合成一个 kernel 后有个数学难题：softmax 需要<strong>全局 max 和 sum</strong>，但分块后每块只看到局部数据。Online Softmax 解决了这个问题。</p>
+
+  <h3>8.1 标准 Softmax 需要 3-pass</h3>
+
+  <div class="diagram"><span class="hl5">Safe Softmax（3 pass）</span>:
+  Pass 1: 遍历 x，求 m = max(x)                ← 需要看完所有元素
+  Pass 2: 遍历 x，求 l = &Sigma; exp(x_j - m)       ← 又遍历一次
+  Pass 3: 遍历 x，求 softmax(x_j) = exp(x_j - m) / l  ← 再遍历一次</div>
+
+  <h3>8.2 递推公式推导</h3>
+
+  <p>已知处理完前 i-1 个元素后：</p>
+  <pre><code>d<sub>i-1</sub> = &Sigma;<sub>j=1</sub><sup>i-1</sup> exp(x<sub>j</sub> - m<sub>i-1</sub>),  m<sub>i-1</sub> = max(x<sub>1</sub>, ..., x<sub>i-1</sub>)</code></pre>
+
+  <p>现在来了第 i 个元素，max 可能变了：m<sub>i</sub> = max(m<sub>i-1</sub>, x<sub>i</sub>)。</p>
+  <p>问题：d<sub>i-1</sub> 里用的是旧 max，需要换成新 max。关键洞察——<strong>修正因子不依赖 j</strong>：</p>
+
+  <pre><code>exp(x<sub>j</sub> - m<sub>old</sub>) &times; exp(m<sub>old</sub> - m<sub>new</sub>) = exp(x<sub>j</sub> - m<sub>new</sub>)</code></pre>
+
+  <p>所以可以一次性把整个 d<sub>i-1</sub> 乘上修正因子：</p>
+
+  <div class="box box-tip">
+    <div class="box-title">Online Softmax 递推公式</div>
+    <pre style="border:none;margin:4px 0"><code>m<sub>i</sub> = max(m<sub>i-1</sub>, x<sub>i</sub>)
+d<sub>i</sub> = d<sub>i-1</sub> &times; exp(m<sub>i-1</sub> - m<sub>i</sub>) + exp(x<sub>i</sub> - m<sub>i</sub>)</code></pre>
+    把 3-pass 的前两步（求 max + 求 sum）合并成<strong>1-pass</strong>。
+  </div>
+
+  <h3>8.3 Online Softmax → 2-pass（极限）</h3>
+
+  <div class="diagram"><span class="hl2">Online Softmax（2 pass）</span>:
+  Pass 1: 遍历 x，<span class="hl2">同时</span>求 m 和 l        ← 合并了 Pass 1+2
+  Pass 2: 遍历 x，求 softmax(x_j)       ← 无法省掉，必须等 m 和 l 确定
+
+Pass 2 无法省掉——要算出每个元素的 softmax 值，必须等 m 和 l 都确定。
+对<span class="hl5">纯 softmax</span>而言，2-pass 是极限。</div>
+
+  <h3>8.4 FlashAttention：进一步到 1-pass</h3>
+
+  <p>FlashAttention 能做到 1-pass，因为 attention 的目标不是 softmax 本身，而是<strong>加权和</strong> O = softmax(s) &middot; V。分子 o 可以和分母 d 用相同的修正因子同步递推：</p>
+
+  <div class="box box-info">
+    <div class="box-title">Attention 的在线递推</div>
+    <pre style="border:none;margin:4px 0"><code>m<sub>i</sub> = max(m<sub>i-1</sub>, s<sub>i</sub>)
+d<sub>i</sub> = d<sub>i-1</sub> &times; exp(m<sub>i-1</sub> - m<sub>i</sub>) + exp(s<sub>i</sub> - m<sub>i</sub>)
+o<sub>i</sub> = o<sub>i-1</sub> &times; exp(m<sub>i-1</sub> - m<sub>i</sub>) + exp(s<sub>i</sub> - m<sub>i</sub>) &times; v<sub>i</sub>
+
+最终: O = o<sub>N</sub> / d<sub>N</sub></code></pre>
+    分子 o 和分母 d <strong>独立累加</strong>，最后一除即可。不需要单独算出每个 softmax 值。
+  </div>
+
+  <h3>8.5 数值例子</h3>
+
+  <p>N=3，d=2，scores = [2, 4, 3]，values = [[10,1], [20,2], [30,3]]：</p>
+
+  <div class="diagram"><span class="hl">标准做法</span>（等全部算完再乘）:
+  m = 4,  d = exp(-2) + 1 + exp(-1) &asymp; 1.503
+  w<sub>1</sub> &asymp; 0.090,  w<sub>2</sub> &asymp; 0.665,  w<sub>3</sub> &asymp; 0.245
+  o = 0.090&times;[10,1] + 0.665&times;[20,2] + 0.245&times;[30,3] = <span class="hl2">[21.55, 2.155]</span>
+
+<span class="hl">Online 做法</span>（边扫描边累加）:
+  j=1: m=2, d=1,     o=[10, 1]
+  j=2: m=4, d=1.135, o=[1.35,0.135]+[20,2] = [21.35, 2.135]
+  j=3: m=4, d=1.503, o=[21.35,2.135]+[11.04,1.104] = [32.39, 3.239]
+
+  最终归一化: O = [32.39, 3.239] / 1.503 = <span class="hl2">[21.55, 2.155]</span>  ✓</div>
+
+</div>
+
+<hr>
+
+<!-- ==================== Section 9 ==================== -->
+<div class="section" id="s9">
+  <div class="section-header">
+    <span class="section-num">09</span>
+    <h2>FlashAttention 算法</h2>
+  </div>
+
+  <p>结合<strong>Tiling + Online Softmax + Kernel Fusion</strong>，FlashAttention 把 Q 分成 T<sub>r</sub> 块、K/V 分成 T<sub>c</sub> 块，块大小由 SRAM 容量决定。</p>
+
+  <h3>9.1 伪代码</h3>
+
+  <pre data-lang="python"><code><span class="cm"># Q 分成 T_r = ceil(N / B_r) 个块, K/V 分成 T_c = ceil(N / B_c) 个块</span>
+<span class="cm"># B_r, B_c 选择使得 Q块 + K块 + V块 + 中间变量 &le; SRAM 大小 M</span>
+
+O = zeros(N, d)
+
+<span class="kw">for</span> i <span class="kw">in</span> range(T_r):                            <span class="cm"># 外层遍历 Q 的块</span>
+    Q_i = load_from_HBM(Q[i*B_r : (i+1)*B_r])   <span class="cm"># 加载 Q 块到 SRAM: (B_r, d)</span>
+    O_i = zeros(B_r, d)                          <span class="cm"># O 在 SRAM 中初始化</span>
+    m_i = full(B_r, -inf)                        <span class="cm"># running max，在 SRAM 中</span>
+    d_i = zeros(B_r)                             <span class="cm"># running sum，在 SRAM 中</span>
+
+    <span class="kw">for</span> j <span class="kw">in</span> range(T_c):                      <span class="cm"># 内层遍历 K/V 的块</span>
+        K_j = load_from_HBM(K[j*B_c : (j+1)*B_c])
+        V_j = load_from_HBM(V[j*B_c : (j+1)*B_c])
+
+        <span class="cm"># --- 以下全在 SRAM 中计算 ---</span>
+        S_block = Q_i @ K_j.T               <span class="cm"># (B_r, B_c) 小矩阵，放得下</span>
+
+        m_new = max(m_i, rowmax(S_block))
+        correction = exp(m_i - m_new)        <span class="cm"># online softmax 修正因子</span>
+        P_block = exp(S_block - m_new)
+
+        d_i = d_i * correction + rowsum(P_block)
+        O_i = O_i * correction + P_block @ V_j
+        m_i = m_new
+        <span class="cm"># --- SRAM 计算结束 ---</span>
+
+    O_i = O_i / d_i                              <span class="cm"># 归一化，仍在 SRAM 中</span>
+    store_to_HBM(O[i*B_r : (i+1)*B_r], O_i)     <span class="cm"># O_i 只写回 HBM 1 次！</span></code></pre>
+
+  <h3>9.2 和 Tiling GEMM 的对比</h3>
+
+  <div class="compare">
+    <div class="compare-card">
+      <h4>Tiling GEMM</h4>
+      <p>每个 block 计算 C 的一块</p>
+      <pre style="border:none;margin:8px 0 0"><code>C_tile = &Sigma;<sub>k</sub> A_tile_k &times; B_tile_k</code></pre>
+      <p style="margin-top:8px;color:var(--text-dim)">纯矩阵乘法，累加就行</p>
+    </div>
+    <div class="compare-card">
+      <h4>FlashAttention</h4>
+      <p>每个 block 计算 O 的一块</p>
+      <pre style="border:none;margin:8px 0 0"><code>O = softmax(Q&middot;K<sup>T</sup>) &times; V</code></pre>
+      <p style="margin-top:8px;color:var(--text-dim)">需要 online softmax 处理跨块归一化</p>
+    </div>
+  </div>
+
+  <div class="box box-tip">
+    <div class="box-title">核心联系</div>
+    FlashAttention 的分块循环结构和 tiling GEMM 的 <code>k_step</code> 循环是<strong>同构的</strong>，只是每一步多了 softmax 的在线修正。
+  </div>
+
+  <h3>9.3 Tile 大小由 SRAM 决定</h3>
+
+  <p>SRAM 要同时放下 Q_tile、K_tile、V_tile 和中间变量：</p>
+
+  <div class="diagram">以 A100（SRAM ~192 KB/SM）、float16（2 bytes）为例：
+
+TILE=64:  3 &times; 64&sup2; &times; 2 = <span class="hl2">24 KB</span>    ← 放得下，常用选择
+TILE=128: 3 &times; 128&sup2; &times; 2 = <span class="hl4">96 KB</span>  ← 勉强
+TILE=256: 3 &times; 256&sup2; &times; 2 = <span class="hl5">384 KB</span> ← 超出，放不下</div>
+
+  <h3>9.4 复杂度对比</h3>
+
+  <table>
+    <tr><th></th><th>标准 Attention</th><th>FlashAttention</th></tr>
+    <tr><td>额外显存</td><td style="color:var(--accent5)">O(N&sup2;)</td><td style="color:var(--accent2)">O(N)</td></tr>
+    <tr><td>HBM IO</td><td>O(N&sup2; + Nd)</td><td style="color:var(--accent2)">O(N&sup2;d&sup2; / M)</td></tr>
+    <tr><td>计算量</td><td>O(N&sup2;d)</td><td>O(N&sup2;d)（不变）</td></tr>
+    <tr><td>Kernel 数</td><td>3 个</td><td style="color:var(--accent2)">1 个</td></tr>
+    <tr><td>物化 S 矩阵</td><td>是</td><td style="color:var(--accent2)">否</td></tr>
+  </table>
+
+  <p>M = SRAM 大小。<strong>SRAM 越大，IO 越少</strong>——IO 复杂度中 M 在分母。</p>
+
+  <h3>9.5 循环顺序：从 v1 到 v2</h3>
+
+  <p>FlashAttention-1 采用外层 K/V、内层 Q，FlashAttention-2 改为<strong>外层 Q、内层 K/V</strong>（上面伪代码所示）。渐近复杂度相同，但外层 Q 更优：</p>
+
+  <div class="diagram"><span class="hl5">外层 K/V，内层 Q（FlashAttention-1）</span>:
+  for j in K/V blocks:           ← K_j 加载 1 次
+      for i in Q blocks:
+          O_i = <span class="hl5">read_from_HBM()</span>  ← 每轮都要从 HBM 读 O_i
+          O_i = update(...)
+          <span class="hl5">write_to_HBM(O_i)</span>     ← 每轮都要写回 O_i
+  → O_i 被读写 <span class="hl5">T_c 次</span>！
+
+<span class="hl2">外层 Q，内层 K/V（FlashAttention-2）</span>:
+  for i in Q blocks:             ← Q_i 加载 1 次，O_i 在 SRAM 中初始化
+      for j in K/V blocks:
+          K_j, V_j = load(...)
+          O_i = update(...)      ← O_i 一直留在 SRAM 里累加
+      <span class="hl2">write_to_HBM(O_i)</span>         ← O_i 只写回 <span class="hl2">1 次</span>！</div>
+
+  <div class="box box-tip">
+    <div class="box-title">为什么 v1 选外层 K/V？</div>
+    不是因为前向传播更好，而是<strong>反向传播</strong>的实现考虑——反向传播需要对 K/V 做梯度累加，外层 K/V 更容易避免多个线程块对同一位置的原子写冲突。FlashAttention-2 解决了这个工程问题后，前向传播改为外层 Q，速度提升约 2 倍。
+  </div>
+
+</div>
+
+<hr>
+
+<!-- ==================== Section 10 ==================== -->
+<div class="section" id="s10">
+  <div class="section-header">
+    <span class="section-num">10</span>
+    <h2>Flash Decoding</h2>
+  </div>
+
+  <h3>10.1 问题：Decode 阶段 GPU 利用率低</h3>
+
+  <p>FlashAttention 沿 <strong>Q 的 seq_len</strong> 分块获得并行度。但 decode 阶段每步只产生 1 个新 token，Q 只有 1 行：</p>
+
+  <div class="diagram">Prefill:  Q = (batch, n_heads, <span class="hl2">数千行</span>, head_dim)  → 充分并行
+Decode:   Q = (batch, n_heads, <span class="hl5">1 行</span>, head_dim)     → 退化为 1 块
+
+典型场景 batch=1, heads=32:
+  并行度 = 32 个线程块
+  A100 有 108 个 SM → <span class="hl5">大量 SM 闲置，利用率 ~30%</span></div>
+
+  <h3>10.2 核心思路：沿 KV 的 seq_len 并行</h3>
+
+  <p>Q 没得分，那就<strong>分 KV</strong>——把 KV cache 沿序列维度切成 S 块，每块独立计算局部注意力，最后合并。</p>
+
+  <div class="diagram"><span class="hl">Flash Decoding</span>:  将 KV cache 拆成 S 块
+
+Block 0:   q &times; K[0:32]<sup>T</sup> → local softmax → &times; V[0:32]    → partial_o_0, lse_0
+Block 1:   q &times; K[32:64]<sup>T</sup> → local softmax → &times; V[32:64]   → partial_o_1, lse_1
+...
+Block S-1: q &times; K[...] → ...                              → partial_o_{S-1}, lse_{S-1}
+
+<span class="hl2">Reduction</span>（用 log-sum-exp 合并）:
+  global_lse = log(&Sigma; exp(lse_i))
+  weight_i = exp(lse_i - global_lse)
+  final_o = &Sigma; weight_i &times; partial_o_i</div>
+
+  <h3>10.3 为什么合并是正确的</h3>
+
+  <p>每块的局部 softmax 分母占全局的比例就是该块的合并权重：</p>
+
+  <pre><code>weight<sub>i</sub> = exp(lse<sub>i</sub>) / &Sigma;<sub>k</sub> exp(lse<sub>k</sub>) = exp(lse<sub>i</sub> - global_lse)</code></pre>
+
+  <p>本质和 online softmax 的修正因子一样——<strong>分子分母独立累加，最后一除</strong>。</p>
+
+  <h3>10.4 并行度对比</h3>
+
+  <table>
+    <tr><th></th><th>FlashAttention (decode)</th><th>Flash Decoding</th></tr>
+    <tr><td>并行维度</td><td>batch &times; n_heads</td><td>batch &times; n_heads &times; <strong>S</strong></td></tr>
+    <tr><td>典型值 (batch=1, heads=32, S=128)</td><td style="color:var(--accent5)">32 个线程块</td><td style="color:var(--accent2)">4096 个线程块</td></tr>
+    <tr><td>A100 SM 利用率 (108 SMs)</td><td style="color:var(--accent5)">~30%</td><td style="color:var(--accent2)">~100%</td></tr>
+  </table>
+
+  <h3>10.5 与 FlashAttention 的关系</h3>
+
+  <table>
+    <tr><th></th><th>FlashAttention</th><th>Flash Decoding</th></tr>
+    <tr><td>优化阶段</td><td>Prefill（长序列并行）</td><td>Decode（逐 token 生成）</td></tr>
+    <tr><td>分块维度</td><td>沿 Q 的 seq_len</td><td>沿 KV 的 seq_len</td></tr>
+    <tr><td>解决的问题</td><td>IO 瓶颈（避免物化 N&sup2; 矩阵）</td><td>并行度不足（Q 只有 1 行）</td></tr>
+    <tr><td>共同数学基础</td><td colspan="2" style="text-align:center">online softmax / log-sum-exp 修正</td></tr>
+  </table>
+
+  <div class="box box-tip">
+    <div class="box-title">实际部署</div>
+    两者逻辑上互不依赖，但通常组合使用：<strong>Prefill 用 FlashAttention，Decode 用 Flash Decoding</strong>，覆盖推理全流程。
+  </div>
+
+</div>
+
+<hr>
+
+<!-- ==================== Q&A ==================== -->
+<div class="section" id="qa">
+  <div class="section-header">
+    <span class="section-num">Q&A</span>
+    <h2>常见问题</h2>
+  </div>
+
+  <h3>&lt;&lt;&lt;grid_size, block_size&gt;&gt;&gt; 的第一个参数是什么？</h3>
+
+  <p>是的，第一个参数 <code>grid_size</code> 指的就是 <strong>Grid 中有多少个 Block</strong>。</p>
+
+  <table>
+    <tr><th>参数</th><th>含义</th><th>说明</th></tr>
+    <tr><td><code>grid_size</code>（第一个）</td><td>Grid 中有多少个 Block</td><td>即 block 的数量</td></tr>
+    <tr><td><code>block_size</code>（第二个）</td><td>每个 Block 中有多少个 Thread</td><td>即每个 block 的线程数</td></tr>
+  </table>
+
+  <p>执行层级：</p>
+  <div class="diagram"><span class="hl">Grid</span>（网格）
+ └── <span class="hl2">Block</span>（线程块）x grid_size 个
+      └── <span class="hl3">Thread</span>（线程）x block_size 个</div>
+
+  <p><strong>总线程数 = grid_size x block_size</strong></p>
+
+</div>
+
+</div><!-- /container -->
+
+</body>
+</html>

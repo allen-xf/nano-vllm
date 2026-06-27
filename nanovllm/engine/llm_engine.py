@@ -31,6 +31,9 @@ class LLMEngine:
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = self.tokenizer.eos_token_id
         self.scheduler = Scheduler(config, collect_metrics=collect_metrics)
+        self.has_spec = config.draft_model is not None
+        if self.has_spec:
+            self.model_runner.set_block_manager(self.scheduler.block_manager)
         # functions to register and unregister cleanup functions.
         # These registered functions are called when the interpreter exits normally
         # Functions registered with atexit will not be called if the program terminates abnormally due to:
@@ -59,14 +62,27 @@ class LLMEngine:
         self.scheduler.record_step(prefill_seqs, decode_seqs)
         if verbose and (prefill_seqs or decode_seqs):
             print(f"  Step: prefill={len(prefill_seqs)}, decode={len(decode_seqs)}")
-        token_ids = self.model_runner.call("run", prefill_seqs, decode_seqs)
-        self.scheduler.postprocess(prefill_seqs, decode_seqs, token_ids)
-        all_seqs = prefill_seqs + decode_seqs
-        outputs = [(seq.seq_id, seq.completion_token_ids) for seq in all_seqs if seq.is_finished]
-        # 统计 token 数
-        num_prefill_tokens = sum(seq.scheduled_chunk_size for seq in prefill_seqs) if prefill_seqs else 0
-        num_decode_tokens = len(decode_seqs)
-        return outputs, num_prefill_tokens, num_decode_tokens
+
+        if self.has_spec:
+            result = self.model_runner.call("run_speculative_step", prefill_seqs, decode_seqs)
+            self.scheduler.postprocess_speculative_step(result)
+            all_seqs = prefill_seqs + decode_seqs
+            outputs = [(seq.seq_id, seq.completion_token_ids) for seq in all_seqs if seq.is_finished]
+            num_prefill_tokens = sum(seq.scheduled_chunk_size for seq in prefill_seqs) if prefill_seqs else 0
+            num_decode_tokens = sum(len(tokens) for tokens in result["decode_accepted_tokens"])
+            if verbose and decode_seqs:
+                accepted = [len(tokens) for tokens in result["decode_accepted_tokens"]]
+                avg_accepted = num_decode_tokens / len(decode_seqs)
+                print(f"  Spec: accepted={accepted}, avg={avg_accepted:.1f}")
+            return outputs, num_prefill_tokens, num_decode_tokens
+        else:
+            token_ids = self.model_runner.call("run", prefill_seqs, decode_seqs)
+            self.scheduler.postprocess(prefill_seqs, decode_seqs, token_ids)
+            all_seqs = prefill_seqs + decode_seqs
+            outputs = [(seq.seq_id, seq.completion_token_ids) for seq in all_seqs if seq.is_finished]
+            num_prefill_tokens = sum(seq.scheduled_chunk_size for seq in prefill_seqs) if prefill_seqs else 0
+            num_decode_tokens = len(decode_seqs)
+            return outputs, num_prefill_tokens, num_decode_tokens
 
     def is_finished(self):
         return self.scheduler.is_finished()

@@ -33,7 +33,13 @@
 - [Q29: BlockManager.deallocate 的逻辑 — 是否真正释放 GPU 显存](#q29-blockmanagerdeallocate-的逻辑--是否真正释放-gpu-显存)
 - [Q30: block_table 与 kv_cache 的关系](#q30-block_table-与-kv_cache-的关系)
 - [Q31: slot_mapping 的用途 — 与 block_table 的粒度区别](#q31-slot_mapping-的用途--与-block_table-的粒度区别)
-- [Q32: TP 多卡时 seq 是怎么发到每个 GPU 上的](#q32-tp-多卡时-seq-是怎么发到每个-gpu-上的)
+- [Q32: KV Cache 的物理存储结构 — K/V 分开还是在一起？block_id 和 layer_id 的关系](#q32-kv-cache-的物理存储结构--kv-分开还是在一起block_id-和-layer_id-的关系)
+- [Q33: TP 多卡时 seq 是怎么发到每个 GPU 上的](#q33-tp-多卡时-seq-是怎么发到每个-gpu-上的)
+- [Q34: 交叉熵 / Cross Entropy / KL 的原理](#q34-交叉熵--cross-entropy--kl-的原理)
+- [Q35: Transformer 训练会用到 KV Cache 吗？](#q35-transformer-训练会用到-kv-cache-吗)
+- [Q36: Temperature 会影响 Speculative Decoding 的接受率吗？](#q36-temperature-会影响-speculative-decoding-的接受率吗)
+- [Q37: Instruct 模型是什么意思？](#q37-instruct-模型是什么意思)
+- [Q38: 为什么长上下文下普通 drafter 更容易失配？](#q38-为什么长上下文下普通-drafter-更容易失配)
 
 ---
 
@@ -1556,29 +1562,6 @@ RMSNorm 是 LayerNorm **去掉中心化和 bias 后的产物**。论文的核心
 
 **特点**：norm 在子模块入口（岔道上），主路上没有 norm。
 
-### 多层堆叠后的差异
-
-看残差主路上经过了什么：
-
-```
-Post-Norm（残差路径上有 norm）        Pre-Norm（残差路径上无 norm）
-
-  x₀                                    x₀
-  │                                      │
-  Add ← Attention(x₀)                   Add ← Attention(RMSNorm(x₀))
-  │                                      │
-  Norm  ← ★ 信号被压缩                   │  ← 直通！
-  │                                      │
-  Add ← MLP(...)                         Add ← MLP(RMSNorm(...))
-  │                                      │
-  Norm  ← ★ 又被压缩                     │  ← 直通！
-  │                                      │
-  Add ← Attention(...)                   Add ← Attention(RMSNorm(...))
-  │                                      │
-  Norm  ← ★ 再次被压缩                   │  ← 直通！
-  │                                      │
-  ...28层后信号反复被 norm 衰减            ...28层后信号保持原样累加
-```
 
 ### 一句话总结
 
@@ -1769,6 +1752,57 @@ y = [emb(100) + 0, 0 + emb(4032)]
 ---
 
 ## Q16: 分布式训练的权重保存与推理加载的完整流程
+
+### 前置知识：模型目录的文件结构
+
+HuggingFace 发布的模型是一个目录，核心文件各有分工：
+
+```
+Qwen3-0.6B/
+├── config.json              ← 模型的"图纸"：超参数（hidden_size、num_layers 等标量）
+├── model.safetensors        ← 模型的"砖头"：训练好的权重张量（Linear 的 weight 矩阵等）
+├── tokenizer.json           ← 词表
+├── tokenizer_config.json    ← tokenizer 配置
+└── generation_config.json   ← 采样参数默认值
+```
+
+**config.json 和 model.safetensors 的关系**：
+
+| | config.json | model.safetensors |
+|---|---|---|
+| 存什么 | 超参数（标量） | 张量（矩阵） |
+| 例子 | `"hidden_size": 2560` | `fc.weight` 的 `[2560, 7680]` 实际数值 |
+| 作用 | 告诉代码创建多大的**空壳模型** | 告诉代码往空壳里**填什么权重** |
+| 读取方式 | `AutoConfig.from_pretrained()` | `safetensors.safe_open()` |
+
+加载模型就是两步：
+
+```python
+# 第 1 步: 读 config.json → 创建空壳模型（权重随机）
+config = AutoConfig.from_pretrained("Qwen3-0.6B")   # 读 config.json
+model = Qwen3ForCausalLM(config)
+# → 根据 hidden_size=1024 等参数，创建正确大小的 Linear、RMSNorm 等
+
+# 第 2 步: 读 model.safetensors → 把训练好的权重填进去
+load_model(model, "Qwen3-0.6B")
+# → 用 safe_open 读出每个张量，copy_ 到对应的 parameter 里
+```
+
+如果只有 config 没有 safetensors → 模型结构对了但权重是随机的，输出是垃圾。
+如果只有 safetensors 没有 config → 不知道该创建多大的模型，张量无处可放。
+
+**safetensors 中可以存两种东西**：
+- **parameters**（`nn.Parameter`）— 模型权重，如 `fc.weight`，参与训练梯度更新
+- **buffers**（`register_buffer`）— 非训练张量，如 EAGLE3 的 `d2t` 映射表，不参与梯度但需要随模型保存
+
+```python
+# 查看 safetensors 里有什么
+from safetensors import safe_open
+with safe_open("model.safetensors", "pt", "cpu") as f:
+    for name in f.keys():
+        t = f.get_tensor(name)
+        print(f"{name}  shape={list(t.shape)}  dtype={t.dtype}")
+```
 
 ### 一、分布式训练时权重如何保存
 
@@ -3392,7 +3426,65 @@ block 不是连续分配的（block 2、5、7 分散在 kv_cache 的不同区域
 
 ---
 
-## Q32: TP 多卡时 seq 是怎么发到每个 GPU 上的
+## Q32: KV Cache 的生命周期 — 从空 tensor 到正式推理
+
+**Q: Attention 里 k_cache/v_cache 初始化是空的，什么时候变成真正的 cache？block_id 和 layer_id 是什么关系？**
+
+### 完整时间线
+
+```
+阶段 1: 加载模型
+  Attention.__init__():
+    self.k_cache = self.v_cache = torch.tensor([])     ← 空的，numel() == 0
+
+阶段 2: warmup（试跑一次，测峰值显存）
+  model_runner.warmup_model():
+    self.run(seqs, [])                                  ← 跑一次 forward
+    → Attention.forward() 中 k_cache.numel() == 0      ← 跳过 store_kvcache
+  torch.cuda.empty_cache()                              ← 清掉临时张量，记住峰值
+
+阶段 3: 分配 KV cache（用剩余显存）
+  model_runner.allocate_kv_cache():
+    self.kv_cache = torch.empty(2, num_layers, num_blocks, block_size, num_kv_heads, head_dim)
+    #                            ↑      ↑
+    #                          K/V    28层     ← 每层各有独立的 block 空间
+
+    layer_id = 0
+    for module in self.model.modules():                 ← 遍历所有 Attention 层
+        module.k_cache = self.kv_cache[0, layer_id]     ← 替换空 tensor 为真实切片
+        module.v_cache = self.kv_cache[1, layer_id]
+        layer_id += 1
+
+    # 之后第 5 层 Attention 的 self.k_cache 就指向 kv_cache[0, 5]
+    # 是一个 view，shape: (num_blocks, block_size, num_kv_heads, head_dim)
+
+阶段 4: 正式推理
+  Attention.forward():
+    k_cache.numel() > 0                                 ← 条件成立，正常读写
+    store_kvcache(k, v, k_cache, v_cache, slot_mapping) ← 写入
+    flash_attn_with_kvcache(q, k_cache, v_cache, ...)   ← 读取
+```
+
+**为什么必须这个顺序**：分配 cache 需要知道剩余显存，而剩余显存 = 总显存 - 模型权重 - warmup 峰值临时张量。不 warmup 就不知道能分多少 block。
+
+### block_id 和 layer_id 的关系
+
+block_id **跨层共享**，layer_id 只在阶段 3 用一次：
+
+```
+block_table = [3, 7, 5]   ← BlockManager 管理，所有层共用同一套 block_id
+
+同一个 block_id=3，在每层指向同一组 token，但存的值不同：
+  kv_cache[0, 0, 3] → 第 0 层的 K，token 0~255
+  kv_cache[0, 1, 3] → 第 1 层的 K，token 0~255（值不同，因为每层权重不同）
+  ...
+```
+
+运行时每层 Attention 直接用 `self.k_cache`（已绑定到自己那层的切片），不需要再传 layer_id。
+
+---
+
+## Q33: TP 多卡时 seq 是怎么发到每个 GPU 上的
 
 **Q: 从 VocabParallelEmbedding 就开始 TP 了，那每张卡的 input_ids 是怎么拿到的？**
 
@@ -3484,3 +3576,583 @@ rank 0 调用 self.call("run", seqs, is_prefill)
 - `input_ids` 很小（几 KB），不值得走 GPU 通信
 - 共享内存是 CPU 端零拷贝，比 pickle → broadcast → unpickle 更简单
 - 同时还能传方法名、控制信号（如 "exit"），不只是 tensor
+
+---
+
+## Q34: 交叉熵 / Cross Entropy / KL 的原理
+
+### 一句话理解
+
+- **交叉熵（Cross Entropy）**：真实分布 $p$ 下，用模型分布 $q$ 来解释数据有多“意外”。越小越好。
+- **KL 散度（KL Divergence）**：两个分布的差异。更准确地说，是用 $q$ 近似 $p$ 时多付出的信息量。越小表示越接近。
+
+### 交叉熵公式
+
+真实分布是 $p(x)$，模型预测分布是 $q(x)$：
+
+$$
+H(p, q) = - \sum_x p(x) \log q(x)
+$$
+
+这个公式不是随便定的，核心来自两个要求：
+
+1. **概率越高，loss 越小**：模型越相信真实发生的事件，惩罚应该越小。
+2. **独立事件的 loss 应该可加**：如果两个事件独立，联合概率是乘法，信息量应该是加法。
+
+设某个事件被模型赋予的概率是 $u$，它发生后的惩罚是 $f(u)$。第二个要求意味着：
+
+$$
+f(u v) = f(u) + f(v)
+$$
+
+满足这个性质、并且连续单调的函数，基本只能是对数函数：
+
+$$
+f(u) = -c \log u
+$$
+
+通常取 $c=1$，所以得到：
+
+$$
+I_q(x) = -\log q(x)
+$$
+
+这就是事件 $x$ 在模型分布 $q$ 下的“惊讶度”或信息量。它有几个合理性质：
+
+- 如果 $q(x)=1$，说明模型完全确定且预测对了，$-\log q(x)=0$
+- 如果 $q(x)$ 越小，说明模型越不相信这个真实事件，$-\log q(x)$ 越大
+- 如果 $q(x)=0$ 但事件真的发生了，loss 是无穷大，表示模型犯了最严重的概率错误
+
+接下来，真实数据不是按 $q$ 产生的，而是按真实分布 $p$ 产生的。所以衡量模型 $q$ 的整体好坏，就要看真实数据分布 $p$ 下的平均 loss：
+
+$$
+\mathbb{E}_{x \sim p}[-\log q(x)]
+= \sum_x p(x)(-\log q(x))
+= -\sum_x p(x)\log q(x)
+$$
+
+这就是交叉熵：**真实数据来自 $p$，但用模型分布 $q$ 去解释它时，平均需要付出的信息量 / 惩罚。**
+
+为什么它可以作为衡量标准？因为它是一个 proper scoring rule：当真实分布是 $p$ 时，期望交叉熵在 $q=p$ 时达到最小。由后面的关系式可知：
+
+$$
+H(p, q) = H(p) + D_{\mathrm{KL}}(p \parallel q)
+$$
+
+其中 $H(p)$ 和模型 $q$ 无关，而 $D_{\mathrm{KL}}(p \parallel q) \ge 0$，且只有 $q=p$ 时等于 0。所以最小化交叉熵会逼着模型分布 $q$ 接近真实分布 $p$。
+
+从编码角度看也一样：如果用 $q$ 设计编码，那么事件 $x$ 的编码长度约等于 $-\log q(x)$；真实数据按 $p$ 出现，所以平均编码长度就是 $H(p, q)$。只有编码分布 $q$ 和真实分布 $p$ 一致时，平均编码长度最短。
+
+在 LLM 训练里，label 通常是 one-hot。真实 next token 是 $y$，其他 token 概率是 0，因此交叉熵退化成：
+
+$$
+H(p, q) = -\log q(y)
+$$
+
+也就是：**模型给正确 token 的概率越高，loss 越小。**
+
+例子：真实 token 是 `cat`。
+
+$$
+\begin{aligned}
+P_A(\text{cat}) &= 0.8, &\quad \text{loss}_A &= -\log(0.8) \approx 0.22 \\
+P_B(\text{cat}) &= 0.1, &\quad \text{loss}_B &= -\log(0.1) \approx 2.30
+\end{aligned}
+$$
+
+所以 cross entropy 本质就是惩罚模型“不相信正确答案”。
+
+### 为什么 LLM 用交叉熵训练
+
+LLM 的预训练目标是 next-token prediction：给定前面的 token，预测下一个 token。
+
+$$
+\text{input} = (x_0, x_1, \dots, x_t), \qquad \text{target} = x_{t+1}
+$$
+
+模型输出整个词表上的 logits，softmax 后得到每个 token 的概率分布。交叉熵只看真实 next token 那一项：
+
+$$
+\mathcal{L}_{\text{CE}} = -\log P_{\text{model}}(x_{t+1} \mid x_{\le t})
+$$
+
+这也是 EAGLE-3 里 `CrossEntropy(predicted_logits, target_token)` 的含义：draft model 直接预测下一个 token，预测越准，交叉熵越低。
+
+### KL 散度公式
+
+KL 散度定义为：
+
+$$
+D_{\mathrm{KL}}(p \parallel q)
+= \sum_x p(x) \log \frac{p(x)}{q(x)}
+= \sum_x p(x) \log p(x) - \sum_x p(x) \log q(x)
+$$
+
+它衡量的是：如果真实分布是 $p$，但你用 $q$ 去近似它，会多付出多少信息量。
+
+### 为什么 KL 一定非负
+
+KL 非负来自一个基本不等式：
+
+$$
+\log z \le z - 1
+$$
+
+等价地：
+
+$$
+-\log z \ge 1 - z
+$$
+
+KL 可以写成：
+
+$$
+D_{\mathrm{KL}}(p \parallel q)
+= \sum_x p(x) \log \frac{p(x)}{q(x)}
+= \sum_x p(x) \left[-\log \frac{q(x)}{p(x)}\right]
+$$
+
+令：
+
+$$
+z = \frac{q(x)}{p(x)}
+$$
+
+代入 $-\log z \ge 1-z$：
+
+$$
+\begin{aligned}
+D_{\mathrm{KL}}(p \parallel q)
+&= \sum_x p(x) \left[-\log \frac{q(x)}{p(x)}\right] \\
+&\ge \sum_x p(x) \left(1 - \frac{q(x)}{p(x)}\right) \\
+&= \sum_x p(x) - \sum_x q(x) \\
+&= 1 - 1 \\
+&= 0
+\end{aligned}
+$$
+
+所以：
+
+$$
+D_{\mathrm{KL}}(p \parallel q) \ge 0
+$$
+
+什么时候等号成立？只有当：
+
+$$
+\frac{q(x)}{p(x)} = 1
+$$
+
+也就是：
+
+$$
+q(x)=p(x)
+$$
+
+对所有 $x$ 都成立时，KL 才等于 0。
+
+如果存在某个 $x$ 满足 $p(x)>0$ 但 $q(x)=0$，那么：
+
+$$
+p(x)\log \frac{p(x)}{q(x)} = +\infty
+$$
+
+说明真实会发生的事件，模型却给了 0 概率，这是最严重的错误。
+
+几个关键点：
+
+- $D_{\mathrm{KL}}(p \parallel q) \ge 0$
+- 等于 0 说明 $p$ 和 $q$ 完全一样
+- **不对称**：$D_{\mathrm{KL}}(p \parallel q) \ne D_{\mathrm{KL}}(q \parallel p)$
+
+### 交叉熵和 KL 的关系
+
+交叉熵可以拆成：
+
+$$
+H(p, q) = H(p) + D_{\mathrm{KL}}(p \parallel q)
+$$
+
+其中：
+
+$$
+H(p) = -\sum_x p(x) \log p(x)
+$$
+
+$H(p)$ 是真实分布自己的熵，和模型 $q$ 无关。因此训练模型时，最小化交叉熵等价于最小化：
+
+$$
+D_{\mathrm{KL}}(p \parallel q)
+$$
+
+也就是让模型分布 $q$ 尽量接近真实数据分布 $p$。
+
+### 在 RLHF / PPO 里的 KL 惩罚
+
+RLHF 里通常有两个分布：
+
+- $\pi_{\text{actor}}$：当前正在训练的策略模型
+- $\pi_{\text{ref}}$：固定不动的参考模型，通常是 SFT model
+
+训练希望 actor 拿到更高 reward，但又不能为了 reward model 跑偏太远，所以加 KL 惩罚：
+
+$$
+D_{\mathrm{KL}}(\pi_{\text{actor}} \parallel \pi_{\text{ref}})
+$$
+
+对 actor 实际采样出来的 token $a_t$，常见的 sampled KL 估计是：
+
+$$
+\log \pi_{\text{actor}}(a_t \mid s_t) - \log \pi_{\text{ref}}(a_t \mid s_t)
+$$
+
+因此 reward 里会减掉这一项：
+
+$$
+r_t = r^{\text{RM}}_t - \beta \left(\log \pi_{\text{actor}}(a_t \mid s_t) - \log \pi_{\text{ref}}(a_t \mid s_t)\right)
+$$
+
+如果只看 KL 部分：
+
+$$
+r^{\text{KL}}_t
+= -\beta \left(\log \pi_{\text{actor}}(a_t \mid s_t) - \log \pi_{\text{ref}}(a_t \mid s_t)\right)
+= \beta \left(\log \pi_{\text{ref}}(a_t \mid s_t) - \log \pi_{\text{actor}}(a_t \mid s_t)\right)
+$$
+
+含义：
+
+- $\log \pi_{\text{actor}}(a_t \mid s_t) > \log \pi_{\text{ref}}(a_t \mid s_t)$：actor 比 ref 更偏向这个 token，可能在偏离 ref，给负惩罚
+- $\log \pi_{\text{actor}}(a_t \mid s_t) < \log \pi_{\text{ref}}(a_t \mid s_t)$：ref 比 actor 更认可这个 token，KL 项相对更友好
+
+### Cross Entropy vs KL
+
+| 对比项 | Cross Entropy | KL Divergence |
+|---|---|---|
+| 关注点 | 模型对真实标签的预测好不好 | 两个分布差多远 |
+| 公式 | $H(p, q) = -\sum_x p(x)\log q(x)$ | $D_{\mathrm{KL}}(p\parallel q)=\sum_x p(x)\log \frac{p(x)}{q(x)}$ |
+| LLM 预训练 | 常用，next-token loss | 隐含在 CE 里 |
+| RLHF/PPO | 不是主要约束项 | 用来限制 actor 不要偏离 ref |
+| one-hot label 时 | $-\log P(\text{correct token})$ | 等价于让模型靠近真实标签分布 |
+
+### 最简记忆
+
+- Cross Entropy：正确答案概率越高，loss 越小。
+- KL Divergence：两个概率分布越像，KL 越小。
+- CE 和 KL 的关系：$H(p, q) = H(p) + D_{\mathrm{KL}}(p \parallel q)$。
+- RLHF 里的 KL：防止 actor 为了刷 reward 偏离 ref model 太远。
+
+---
+
+## Q35: Transformer 训练会用到 KV Cache 吗？
+
+通常**不会**。标准 Transformer 预训练 / SFT 训练一般不用推理里的 KV cache；KV cache 主要是**自回归推理加速**用的。
+
+### 训练时怎么做
+
+训练时通常一次输入整个序列，比如长度为 `T`：
+
+```
+input:  [x0, x1, x2, ..., xT]
+target: [x1, x2, x3, ..., xT+1]
+```
+
+模型会一次性算出所有位置的 Q/K/V，然后用 causal mask 保证第 `i` 个 token 只能看 `0...i` 的历史 token：
+
+```
+所有 token 并行计算 Q/K/V
+        │
+        ▼
+causal attention mask
+        │
+        ▼
+每个位置预测下一个 token
+```
+
+所以训练不是像推理那样“先生成第 1 个 token，再生成第 2 个 token……”，而是把整段序列并行算完。
+
+### 推理时为什么需要 KV cache
+
+自回归推理一次只生成一个新 token。如果不用 KV cache，每生成一步都要重新计算所有历史 token 的 K/V：
+
+```
+生成第 1 个 token：算 prompt 的 K/V
+生成第 2 个 token：重新算 prompt + token1 的 K/V
+生成第 3 个 token：重新算 prompt + token1 + token2 的 K/V
+```
+
+这会大量重复计算。
+
+KV cache 的做法是：历史 token 的 K/V 算过一次就缓存起来，后续只算新 token 的 Q/K/V：
+
+```
+生成第 1 个 token：写入 K/V cache
+生成第 2 个 token：复用历史 K/V，只追加新 token 的 K/V
+生成第 3 个 token：继续复用历史 K/V
+```
+
+这样 decode 阶段每一步只需要让当前 token 的 Q 去 attend 到缓存里的所有 K/V。
+
+### 为什么训练一般不用 KV cache
+
+1. **训练是并行的**  
+   一次 forward 已经包含整段序列，所有位置的 K/V 都在同一次计算里产生，不需要跨 step 缓存。
+
+2. **训练需要反向传播**  
+   训练时 Q/K/V 和 attention 中间结果都要参与梯度计算。把它们像推理一样缓存起来，不但不能省掉反传需要的激活，反而会增加显存管理复杂度。
+
+3. **训练的优化方向不同**  
+   训练通常用 FlashAttention、activation checkpointing、sequence parallelism、ZeRO/FSDP 等方式降低显存或提升吞吐，而不是靠 KV cache。
+
+### 例外情况
+
+有些场景看起来像“训练”，但其中的**生成阶段**会用 KV cache：
+
+- RLHF / PPO / online RL rollout 里，模型先生成回答；这个生成过程会用 KV cache
+- DPO / SFT 训练前如果要在线采样数据，采样阶段会用 KV cache
+- speculative decoding / draft model 训练相关流程里，如果包含自回归生成，也会用 KV cache
+
+还有一些特殊架构会缓存跨 segment 的状态，例如 Transformer-XL、streaming Transformer、长上下文 recurrent memory 模型。但这类缓存不是普通 decoder-only LLM 推理框架里的 KV cache。
+
+### 最简记忆
+
+- **标准训练**：整段序列并行 forward，用 causal mask，不用 KV cache。
+- **自回归推理**：一个 token 一个 token 生成，为了避免重复计算历史 K/V，用 KV cache。
+- **训练中的生成环节**：如果真的在做 autoregressive generation，也会用 KV cache。
+
+---
+
+## Q36: Temperature 会影响 Speculative Decoding 的接受率吗？
+
+会。Temperature 会影响 speculative decoding 的接受率，因为接受率取决于 **draft model 分布** 和 **target model 分布** 有多接近。
+
+设：
+
+- draft model 分布是 $q(x)$
+- target model 分布是 $p(x)$
+
+经典 speculative sampling 中，draft 先从 $q$ 里采样一个 token $x$，target 用 $p$ 验证。接受概率是：
+
+$$
+\min\left(1, \frac{p(x)}{q(x)}\right)
+$$
+
+所以如果 $p$ 和 $q$ 越接近，draft token 越容易被 target 接受。
+
+### Temperature 改变什么
+
+Temperature 会改变 softmax 后的概率分布：
+
+$$
+p_T(x)
+=
+\operatorname{softmax}\left(\frac{z_x}{T}\right)
+$$
+
+其中：
+
+- $T < 1$：分布更尖锐，更偏向高概率 token
+- $T = 1$：原始分布
+- $T > 1$：分布更平坦，更容易采到低概率 token
+
+Speculative decoding 实际比较的是经过 temperature 之后的两个分布：
+
+$$
+p_T(x)
+\quad \text{和} \quad
+q_T(x)
+$$
+
+平均接受率可以理解为两个分布的重叠程度：
+
+$$
+\text{acceptance rate}
+=
+\sum_x \min(p_T(x), q_T(x))
+$$
+
+重叠越大，接受率越高；重叠越小，接受率越低。
+
+### 低 temperature 通常提高接受率
+
+当 temperature 较低时，例如：
+
+```text
+temperature = 0.2 / 0.5
+```
+
+分布会更集中在 top token 上。如果 draft model 和 target model 的 top choices 比较一致，那么 draft 更容易采到 target 也认可的 token。
+
+例如：
+
+```text
+target: cat 0.8, dog 0.1, ...
+draft:  cat 0.7, dog 0.2, ...
+```
+
+这时 draft 大概率提出 `cat`，target 也很认可 `cat`，所以接受率高。
+
+### 高 temperature 通常降低接受率
+
+当 temperature 较高时，例如：
+
+```text
+temperature = 1.0 / 1.3 / 1.5
+```
+
+分布更平坦，采样更随机，draft 更容易采到 tail token。
+
+如果 draft 采到 target 概率较低的 token：
+
+```text
+draft 采到某个低概率 token
+target 对它的概率也很低
+=> p_T(x) / q_T(x) 小
+=> 更容易 reject
+```
+
+所以常见现象是：
+
+```text
+temperature 越高
+=> acceptance rate 越低
+=> τ 越小
+=> speculative decoding 加速效果越差
+```
+
+### 和 τ 的关系
+
+Speculative decoding 里常用 $\tau$ 表示每轮 target model verification 平均能推进多少 token。
+
+例如：
+
+```text
+τ = 3.3
+```
+
+表示平均每次 target model 验证，可以让输出前进 3.3 个 token。
+
+如果 temperature 升高导致接受率下降，那么：
+
+```text
+平均接受 token 数下降
+=> τ 下降
+=> target model forward 次数增加
+=> 实际加速变差
+```
+
+### 但不是绝对单调
+
+严格来说，temperature 和接受率不一定数学上永远单调。因为接受率本质取决于：
+
+$$
+\sum_x \min(p_T(x), q_T(x))
+$$
+
+如果升高 temperature 后，draft 分布和 target 分布反而更接近，接受率也可能提高。
+
+但在 LLM speculative decoding 的常见场景里，高 temperature 会增加随机性，让 draft 更容易偏离 target，所以通常会看到接受率下降。
+
+### 最简记忆
+
+- Temperature 会影响 spec decoding 的接受率。
+- 接受率取决于 draft 分布 $q_T$ 和 target 分布 $p_T$ 的重叠程度。
+- 通常 temperature 越高，采样越随机，接受率越低。
+- 接受率降低会让 $\tau$ 变小，spec decoding 的加速效果变差。
+
+---
+
+## Q37: Instruct 模型是什么意思？
+
+Instruct 模型就是经过**指令微调**的模型。
+
+一句话：
+
+> Base model 更像续写器；Instruct model 更像会听指令的助手。
+
+### Base model
+
+Base model 主要通过 next-token prediction 训练：
+
+```text
+给定前文，预测下一个 token
+```
+
+所以它更擅长续写文本，不一定会按用户问题来回答。
+
+### Instruct model
+
+Instruct model 在 base model 基础上继续用“指令-回答”数据训练：
+
+```text
+User: 介绍一下 KV cache
+Assistant: KV cache 是 Transformer 推理时缓存历史 K/V 的机制...
+```
+
+因此它更擅长：
+
+- 问答
+- 聊天
+- 总结
+- 写代码
+- 按用户要求完成任务
+
+### 常见命名
+
+例如：
+
+```text
+Qwen3-8B          = base model
+Qwen3-8B-Instruct = instruct model
+```
+
+### 为什么要用 chat template
+
+Instruct 模型训练时通常见过固定对话格式，例如：
+
+```text
+<|im_start|>user
+介绍一下 KV cache<|im_end|>
+<|im_start|>assistant
+```
+
+所以推理时也要用 `apply_chat_template` 把用户输入包装成模型熟悉的格式。
+
+### 最简记忆
+
+- **Base model**：主要会续写。
+- **Instruct model**：经过指令微调，更会回答问题和执行指令。
+
+---
+
+## Q38: 为什么长上下文下普通 drafter 更容易失配？
+
+核心原因：**speculative decoding 的接受长度取决于 drafter 的分布 $q$ 是否接近 target model 的分布 $p$**。上下文越长，普通 drafter 的 $q(x \mid \text{long context})$ 越容易偏离 target 的 $p(x \mid \text{long context})$，所以 acceptance length 会下降。
+
+表格里的现象就是：
+
+```text
+Base drafter: context 越长，acceptance length 越低
+Long drafter: 做过长上下文微调后，长 context 下仍能保持较高接受长度
+```
+
+主要原因：
+
+1. **长上下文更依赖远处信息**  
+   target model 可能能找到前面几万 token 里的关键信息，普通 drafter 更容易只依赖局部上下文。
+
+2. **小 drafter 和大 target 的能力差距被放大**  
+   长文任务需要检索、跨段落理解、忽略噪声、维护长距离实体关系，这些能力小模型通常更弱。
+
+3. **普通 drafter 训练分布偏短上下文**  
+   它在 1K/2K 里可能和 target 很接近，但到 16K/32K 就变成分布外推。
+
+4. **位置编码 / RoPE 外推可能不一致**  
+   如果 target 做过长上下文适配，而 drafter 没有，高 position 上两者表示会更不一致。
+
+5. **spec 对连续错误很敏感**  
+   draft 一串 token，只要前面某个 token 被拒绝，后面的通常也废了。所以单 token 接受率小幅下降，会让平均接受长度明显下降。
+
+一句话：
+
+> 长上下文不是让 spec 机制失效，而是让普通 drafter 更不像 target model；长上下文微调的 drafter 能重新拉近二者分布，所以 acceptance length 更高。

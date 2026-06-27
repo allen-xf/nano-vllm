@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tree Draft 基础：静态树、动态树与工程约束</title>
+  <style>
+    :root {
+      --text: #1f2933;
+      --muted: #52616b;
+      --border: #d9e2ec;
+      --bg: #ffffff;
+      --soft: #f6f8fa;
+      --blue: #2563eb;
+      --green: #138a36;
+      --orange: #b45309;
+      --red: #b91c1c;
+      --code: #0f172a;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.75;
+    }
+
+    main {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 36px 28px 72px;
+    }
+
+    h1, h2, h3, h4 {
+      line-height: 1.3;
+      color: #111827;
+    }
+
+    h1 {
+      font-size: 32px;
+      margin: 0 0 12px;
+    }
+
+    h2 {
+      font-size: 24px;
+      margin-top: 44px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    h3 {
+      font-size: 19px;
+      margin-top: 28px;
+    }
+
+    p {
+      margin: 10px 0;
+    }
+
+    ul, ol {
+      padding-left: 24px;
+    }
+
+    li {
+      margin: 6px 0;
+    }
+
+    code {
+      color: var(--code);
+      background: #eef2f7;
+      border: 1px solid #dde6f0;
+      border-radius: 4px;
+      padding: 1px 5px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 0.92em;
+    }
+
+    pre {
+      background: #0f172a;
+      color: #e5e7eb;
+      border-radius: 8px;
+      padding: 16px 18px;
+      overflow-x: auto;
+      line-height: 1.55;
+      border: 1px solid #1f2937;
+    }
+
+    pre code {
+      background: transparent;
+      border: 0;
+      color: inherit;
+      padding: 0;
+      font-size: 13px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0;
+      font-size: 14px;
+    }
+
+    th, td {
+      border: 1px solid var(--border);
+      padding: 10px 12px;
+      vertical-align: top;
+    }
+
+    th {
+      background: #f1f5f9;
+      text-align: left;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 15px;
+      margin-bottom: 24px;
+    }
+
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px 20px;
+      background: var(--soft);
+      margin: 18px 0;
+    }
+
+    .ok {
+      border-left: 5px solid var(--green);
+      background: #effaf2;
+    }
+
+    .warn {
+      border-left: 5px solid var(--orange);
+      background: #fff7ed;
+    }
+
+    .danger {
+      border-left: 5px solid var(--red);
+      background: #fef2f2;
+    }
+
+    .info {
+      border-left: 5px solid var(--blue);
+      background: #eff6ff;
+    }
+
+    .toc {
+      background: #f8fafc;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px 20px;
+      margin: 26px 0 34px;
+    }
+
+    .toc a {
+      color: var(--blue);
+      text-decoration: none;
+    }
+
+    .toc a:hover {
+      text-decoration: underline;
+    }
+
+    .small {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .pill {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 2px 10px;
+      margin-right: 6px;
+      font-size: 12px;
+      background: #eef2ff;
+      color: #3730a3;
+      border: 1px solid #c7d2fe;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Tree Draft 基础：静态树、动态树与工程约束</h1>
+  <p class="subtitle">
+    这篇文档面向工程实现，说明 tree draft 的基本概念、静态树和动态树的定义、为什么当前通常不先做静态 tree、为什么动态 tree 很难与 CUDA graph 兼容，以及为什么在高并发服务场景下 speculative decoding 的收益会变小。
+  </p>
+
+  <div class="card ok">
+    <strong>先记核心结论：</strong>
+    <ol>
+      <li><strong>tree draft</strong> 是让 draft model 生成一棵候选 token 树，而不是一条候选链。</li>
+      <li><strong>静态 tree</strong> 指树骨架固定；<strong>动态 tree</strong> 指树骨架运行时根据 logits / score 决定。</li>
+      <li>静态 tree 只解决“树形是否固定”的问题，<strong>并不能自动解决 tree attention mask</strong> 这个根问题。</li>
+      <li>动态 tree 的难点不只是 mask，还包括 <strong>shape 变化、控制流变化、path compaction、CPU/GPU overlap</strong>，所以很难吃到 CUDA graph。</li>
+      <li>高并发时 speculative decoding 收益有限，核心原因是 <strong>continuous batching 已经把 target decode 的串行空洞填掉了</strong>。</li>
+    </ol>
+  </div>
+
+  <nav class="toc">
+    <strong>目录</strong>
+    <ol>
+      <li><a href="#what">什么是 tree draft</a></li>
+      <li><a href="#static-dynamic">静态 tree draft 与动态 tree draft</a></li>
+      <li><a href="#why-not-static">目前不支持静态 tree 的原因</a></li>
+      <li><a href="#dynamic-cudagraph">为什么动态 tree 很难 CUDA graph</a></li>
+      <li><a href="#high-concurrency">为什么高并发下 spec 收益有限</a></li>
+      <li><a href="#summary">总结</a></li>
+    </ol>
+  </nav>
+
+  <section id="what">
+    <h2>1. 什么是 tree draft</h2>
+    <p>
+      普通 speculative decoding 里，draft model 通常只生成一条候选链：
+    </p>
+    <pre><code>context -&gt; t1 -&gt; t2 -&gt; t3</code></pre>
+    <p>
+      tree draft 则不是一条链，而是一棵候选树：
+    </p>
+    <pre><code>context
+├─ A
+│  ├─ B
+│  └─ C
+└─ D
+   ├─ E
+   └─ F</code></pre>
+    <p>
+      最终 target model 并不会把整棵树全部接受，而是<strong>一次性验证整棵树</strong>，然后从中接受一条 path（或 path 的前缀）。
+    </p>
+
+    <div class="card info">
+      <strong>tree draft 的直觉：</strong>
+      线性 draft 的问题是“第一个 token 猜错，后面整条链都废了”；tree draft 试图用更多候选分支来提高 target 的命中率。
+    </div>
+
+    <h3>1.1 为什么 tree draft 需要专门的 attention</h3>
+    <p>
+      树节点通常要被压平成一维 token 序列再送入 verifier。例如上面的树可以被 flatten 成：
+    </p>
+    <pre><code>[A, D, B, C, E, F]</code></pre>
+    <p>
+      但压平之后，不能直接使用普通 causal mask。因为例如 <code>B</code> 只能看：
+    </p>
+    <ul>
+      <li>原始 context</li>
+      <li>自己的祖先 <code>A</code></li>
+      <li>自己</li>
+    </ul>
+    <p>
+      它<strong>不能</strong>看到兄弟分支上的 <code>D</code>、<code>E</code>、<code>F</code>。所以 tree draft 需要的是 <strong>ancestor mask / tree attention</strong>，而不是普通的 causal attention。
+    </p>
+  </section>
+
+  <section id="static-dynamic">
+    <h2>2. 静态 tree draft 与动态 tree draft</h2>
+
+    <h3>2.1 静态 tree draft 的定义</h3>
+    <p>
+      静态 tree 的意思是：<strong>树的骨架在推理前就固定了</strong>。固定的是：
+    </p>
+    <ul>
+      <li>最大深度</li>
+      <li>每层最多多少节点</li>
+      <li>每个节点有哪些子节点位置</li>
+      <li>flatten 顺序和 parent / ancestor 关系</li>
+    </ul>
+    <p>
+      注意，<strong>固定的是结构，不是 token 内容</strong>。每个节点最终填什么 token，仍然是运行时根据 draft logits 得到的。
+    </p>
+    <pre><code>静态 tree 模板（示意）
+root
+├─ n1
+│  ├─ n3
+│  └─ n4
+└─ n2
+   ├─ n5
+   └─ n6</code></pre>
+
+    <h3>2.2 动态 tree draft 的定义</h3>
+    <p>
+      动态 tree 的意思是：<strong>只有预算固定，树怎么长由运行时决定</strong>。例如：
+    </p>
+    <ul>
+      <li>当前 top-1 概率很高，就沿着一条路继续往深处扩</li>
+      <li>当前分布很平，就多开几个兄弟分支</li>
+      <li>某条 path 分数更高，就把更多节点预算给它</li>
+    </ul>
+    <pre><code>同样是 8 个节点预算
+
+场景 A（模型很确定）:
+root -&gt; A -&gt; B -&gt; C -&gt; D
+
+场景 B（模型不确定）:
+root
+├─ A
+├─ B
+├─ C
+└─ D</code></pre>
+
+    <table>
+      <thead>
+        <tr>
+          <th>维度</th>
+          <th>静态 tree</th>
+          <th>动态 tree</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>树形</td>
+          <td>预先固定</td>
+          <td>运行时决定</td>
+        </tr>
+        <tr>
+          <td>节点预算分配</td>
+          <td>按模板预留</td>
+          <td>按当前 logits / score 分配</td>
+        </tr>
+        <tr>
+          <td>parent / ancestor 关系</td>
+          <td>固定</td>
+          <td>每轮变化</td>
+        </tr>
+        <tr>
+          <td>verifier 输入布局</td>
+          <td>flatten 模板固定</td>
+          <td>每轮可能重排</td>
+        </tr>
+        <tr>
+          <td>工程复杂度</td>
+          <td>中等</td>
+          <td>很高</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="why-not-static">
+    <h2>3. 目前不支持静态 tree 的原因</h2>
+    <p>
+      可以压缩成 3 个主因：
+    </p>
+    <ol>
+      <li><strong>现有 speculative pipeline 主要按线性链设计。</strong> 很多默认假设都是 <code>[batch, K]</code> 的链式 proposal、普通 causal attention，以及 verify 后只返回少量 accepted / rejected 摘要；换成 tree 后，这些假设都会失效。</li>
+      <li><strong>静态 tree 也绕不过 tree attention。</strong> 树状 token 压成一维后，需要的是 ancestor mask，而不是普通 causal mask。标准 FlashAttention / paged causal attention 一般不直接支持这种不规则 mask，所以还需要额外的 tree-aware attention backend。</li>
+      <li><strong>verify 后的后处理仍然是动态的。</strong> 即使树模板固定，系统还是要知道最终接受的是哪条 path，并据此做 compaction、KV / metadata 更新以及下一轮输入整理，所以实现不会像线性 speculative decoding 那样简单。</li>
+    </ol>
+
+    <div class="card danger">
+      <strong>一句话记忆：</strong>
+      静态 tree 解决的是“树形固定”，但没有解决 <strong>tree mask</strong> 和 <strong>path-based 后处理</strong> 这两个核心工程问题。
+    </div>
+  </section>
+
+  <section id="dynamic-cudagraph">
+    <h2>4. 为什么动态 tree 很难 CUDA graph</h2>
+    <p>
+      主因很简单：<strong>CUDA graph 需要执行图尽量固定，而动态 tree 每轮都会改执行图</strong>。
+      动态 tree 会让节点数、flatten 布局、tree mask、accepted path 以及后续 compaction 都随当前 logits 改变，导致输入 shape 和控制流都不稳定，graph 很难稳定 replay。
+    </p>
+
+    <div class="card info">
+      <strong>一句话记忆：</strong>
+      静态 tree 的主要问题是 <strong>tree mask 不规则</strong>；动态 tree 则在此基础上又多了 <strong>shape 不固定 + 控制流不固定</strong>，所以更难和 CUDA graph 兼容。
+    </div>
+
+    <p>
+      理论上可以通过很多模板、分桶和 padding 去硬做，但通常会带来模板数爆炸、预热成本高、无效计算增加，工程上往往不划算。
+    </p>
+  </section>
+
+  <section id="high-concurrency">
+    <h2>5. 为什么高并发下 spec 收益有限</h2>
+
+    <h3>5.1 spec 真正在优化什么</h3>
+    <p>
+      speculative decoding 的核心价值是：<strong>减少 target model 的串行 decode 步数</strong>。当请求很少时，单个请求一步一步 decode，GPU 往往吃不满；spec 通过 draft + verify，一次确认多个 token，就能明显减少 target 的串行轮数。
+    </p>
+
+    <h3>5.2 高并发时，continuous batching 已经在填这个坑</h3>
+    <p>
+      在高并发服务里，很多请求同时 decode。调度器会把不同请求的 token 混在一起执行，使 target model 的 decode batch 本来就很满。这时：
+    </p>
+    <ul>
+      <li>GPU 本来就接近饱和</li>
+      <li>单请求的串行空洞，已经被跨请求 batching 填掉</li>
+      <li>spec 再减少一点 target 步数，边际收益就小了</li>
+    </ul>
+
+    <pre><code>低并发：
+[target step] ... 空
+[target step] ... 空
+[target step] ... 空
+
+高并发：
+[target(req1)][target(req2)][target(req3)][target(req4)] ...</code></pre>
+
+    <h3>5.3 高并发下 spec 还会引入额外成本</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>额外成本</th>
+          <th>说明</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>draft model forward</td>
+          <td>即使 draft 很小，也不是零成本。</td>
+        </tr>
+        <tr>
+          <td>verify / reject-sample</td>
+          <td>需要额外的 logits 处理、接受/拒绝逻辑。</td>
+        </tr>
+        <tr>
+          <td>metadata 更新</td>
+          <td>slot mapping、positions、query layout 都要维护。</td>
+        </tr>
+        <tr>
+          <td>CPU/GPU 协同</td>
+          <td>高负载下更难把 overlap 做得漂亮。</td>
+        </tr>
+        <tr>
+          <td>batch token budget 挤占</td>
+          <td>draft / verify 会消耗 token budget，可能影响调度器吞吐。</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>5.4 decode 往往是 memory-bound，不是纯算力不够</h3>
+    <p>
+      高并发 decode 的瓶颈很多时候是 KV cache 访问和 HBM 带宽，而不是纯 FLOPs 不够。spec 并不会神奇地消灭所有内存访问，有时只是把“target 的串行步数减少了一些”，但又引入了额外 draft / verify 访问，最终吞吐提升并不大。
+    </p>
+
+    <div class="card warn">
+      <strong>所以更准确的说法是：</strong>
+      speculative decoding 不是高并发下一定没用，而是<strong>在 throughput-first、高 batch occupancy 的场景里，边际收益通常显著下降</strong>。
+    </div>
+
+    <h3>5.5 一个简单判断标准</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>场景</th>
+          <th>spec 的价值</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>低并发 / 单请求 latency 优先</td>
+          <td>通常更值</td>
+        </tr>
+        <tr>
+          <td>高并发 / 吞吐优先</td>
+          <td>通常收益变小，甚至不如直接把 target batch 做满</td>
+        </tr>
+        <tr>
+          <td>已有很强的 continuous batching</td>
+          <td>spec 的边际收益进一步下降</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="summary">
+    <h2>6. 总结</h2>
+    <div class="card ok">
+      <span class="pill">Tree draft</span>
+      <span class="pill">Static tree</span>
+      <span class="pill">Dynamic tree</span>
+      <span class="pill">CUDA graph</span>
+      <span class="pill">High concurrency</span>
+      <p>
+        1. tree draft 的本质是让 draft model 生成候选树，再由 target 一次性验证整棵树并接受其中一条 path。
+      </p>
+      <p>
+        2. 静态 tree 固定的是骨架，不是 token；但即使树形固定，仍然需要 tree-aware attention backend 来正确执行 ancestor mask。
+      </p>
+      <p>
+        3. 目前不支持静态 tree，主因是现有 pipeline 主要按线性链设计，而 tree 还需要额外的 tree attention 和 path-based 后处理。
+      </p>
+      <p>
+        4. 动态 tree 很难和 CUDA graph 兼容，主因是它会让 shape 和控制流都随运行时结果变化。
+      </p>
+      <p>
+        5. 高并发场景下 spec 收益有限，因为 continuous batching 已经把 target decode 的串行空洞填掉了；此时 spec 带来的额外 draft / verify / 调度成本更容易吞掉收益。
+      </p>
+    </div>
+
+    <p class="small">
+      如果后续要在工程里真正推进 tree draft，最现实的顺序通常是：<strong>先定义固定 tree template，再解决 tree attention backend，再处理 verifier path compaction，最后再考虑更激进的动态 tree</strong>。
+    </p>
+  </section>
+</main>
+</body>
+</html>
