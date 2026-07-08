@@ -31,6 +31,7 @@ class Context:
     # decode 部分的字段（混合 batch 时同时存在）
     decode_slot_mapping: torch.Tensor | None = None
     decode_block_tables: torch.Tensor | None = None
+    causal: bool = True
 
 
 '''

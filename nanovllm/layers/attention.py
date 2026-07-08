@@ -123,6 +123,12 @@ class Attention(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.k_cache = self.v_cache = torch.tensor([])
 
+    def update_kv_cache(self, key: torch.Tensor, value: torch.Tensor, slot_mapping: torch.Tensor | None):
+        if slot_mapping is None:
+            return
+        if self.k_cache.numel() and self.v_cache.numel():
+            store_kvcache(key, value, self.k_cache, self.v_cache, slot_mapping)
+
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
         context = get_context()
         k_cache, v_cache = self.k_cache, self.v_cache
@@ -147,7 +153,7 @@ class Attention(nn.Module):
             p_o = flash_attn_varlen_func(p_q, p_k, p_v,
                                          max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
                                          max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
-                                         softmax_scale=self.scale, causal=True, block_table=context.block_tables)
+                                         softmax_scale=self.scale, causal=context.causal, block_table=context.block_tables)
 
             if num_decode_seqs > 0:
                 # decode 部分
@@ -161,7 +167,7 @@ class Attention(nn.Module):
 
                 d_o = flash_attn_with_kvcache(d_q.unsqueeze(1), k_cache, v_cache,
                                               cache_seqlens=context.decode_context_lens, block_table=context.decode_block_tables,
-                                              softmax_scale=self.scale, causal=True).squeeze(1)
+                                              softmax_scale=self.scale, causal=context.causal).squeeze(1)
                 o = torch.cat([p_o, d_o], dim=0)
             else:
                 o = p_o
@@ -171,5 +177,5 @@ class Attention(nn.Module):
                 store_kvcache(k, v, k_cache, v_cache, context.decode_slot_mapping)
             o = flash_attn_with_kvcache(q.unsqueeze(1), k_cache, v_cache,
                                         cache_seqlens=context.decode_context_lens, block_table=context.block_tables,
-                                        softmax_scale=self.scale, causal=True)
+                                        softmax_scale=self.scale, causal=context.causal)
         return o

@@ -142,6 +142,7 @@ def run_once(
         )
         if draft_model:
             llm_kwargs["draft_model"] = draft_model
+            llm_kwargs["spec_method"] = args.spec_method
             llm_kwargs["num_spec_tokens"] = args.num_spec_tokens
 
         llm = LLM(args.model, **llm_kwargs)
@@ -239,7 +240,9 @@ def print_result(result: BenchResult) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compare nano-vLLM performance with spec on/off")
     parser.add_argument("--model", required=True, help="Target model path")
-    parser.add_argument("--draft-model", required=True, help="EAGLE3 draft model path")
+    parser.add_argument("--draft-model", required=True, help="Speculative draft model path")
+    parser.add_argument("--spec-method", choices=["eagle3", "dflash"], default="eagle3",
+                        help="Speculative backend to benchmark")
     parser.add_argument("--num-prompts", type=int, default=64)
     parser.add_argument("--prompt-len", type=int, default=512)
     parser.add_argument("--max-tokens", type=int, default=128)

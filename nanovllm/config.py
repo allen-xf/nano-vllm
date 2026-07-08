@@ -18,8 +18,9 @@ class Config:
     eos: int = -1 #end of sequence
     kvcache_block_size: int = 256 # Size of blocks for KV cache allocation 假如一个完成的sequence是1024个token，那么需要4个block
     num_kvcache_blocks: int = -1 # -1 根据显存动态计算
-    # speculative decoding (EAGLE3)
-    draft_model: Optional[str] = None # EAGLE3 draft model 路径
+    # speculative decoding
+    draft_model: Optional[str] = None # draft model 路径
+    spec_method: str = "eagle3" # speculative backend: 当前仅支持 eagle3，后续扩展 dflash
     num_spec_tokens: int = 5 # 每步 draft 生成的 token 数 K
     eagle3_fuse_layers: Optional[List[int]] = None # target model 中用于融合的层索引，None 时自动选取
     spec_profile: bool = False # 是否开启 spec 阶段同步计时
@@ -34,16 +35,34 @@ class Config:
         self.hf_config = AutoConfig.from_pretrained(self.model) # 根据指定的模型标识符，从云端（或本地缓存）下载并加载该模型的元数据配置文件
         self.hf_config.save_pretrained('/root/llm/nano-vllm/')
         self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)
-        # EAGLE3 draft model config
+        # speculative draft model config
         if self.draft_model:
+            assert self.spec_method in {"eagle3", "dflash"}, "spec_method must be 'eagle3' or 'dflash'"
             assert os.path.isdir(self.draft_model)
             self.draft_hf_config = AutoConfig.from_pretrained(self.draft_model)
-            # 自动选取融合层：EAGLE3 paper default (layer 2, middle, third-from-last)
-            if self.eagle3_fuse_layers is None:
-                # 优先使用 draft model config 中指定的层索引
-                eagle_config = getattr(self.draft_hf_config, 'eagle_config', None)
-                if eagle_config and 'eagle_aux_hidden_state_layer_ids' in eagle_config:
-                    self.eagle3_fuse_layers = eagle_config['eagle_aux_hidden_state_layer_ids']
-                else:
-                    n = self.hf_config.num_hidden_layers
-                    self.eagle3_fuse_layers = [2, n // 2, n - 3]
+            if self.spec_method == "eagle3":
+                # 自动选取融合层：EAGLE3 paper default (layer 2, middle, third-from-last)
+                if self.eagle3_fuse_layers is None:
+                    # 优先使用 draft model config 中指定的层索引
+                    eagle_config = getattr(self.draft_hf_config, 'eagle_config', None)
+                    if eagle_config and 'eagle_aux_hidden_state_layer_ids' in eagle_config:
+                        self.eagle3_fuse_layers = eagle_config['eagle_aux_hidden_state_layer_ids']
+                    else:
+                        n = self.hf_config.num_hidden_layers
+                        self.eagle3_fuse_layers = [2, n // 2, n - 3]
+            else:
+                assert getattr(self.hf_config, "model_type", None) == "qwen3", "DFlash currently only supports Qwen3 target models"
+                dflash_config = getattr(self.draft_hf_config, "dflash_config", None)
+                assert dflash_config is not None, "DFlash draft model requires dflash_config"
+                assert dflash_config.get("mask_token_id") is not None, "DFlash requires dflash_config.mask_token_id"
+                assert (
+                    dflash_config.get("target_layer_ids") is not None
+                    or dflash_config.get("layer_ids") is not None
+                ), "DFlash requires dflash_config.target_layer_ids or layer_ids"
+                assert not dflash_config.get("use_swa", False), "DFlash SWA is not supported yet"
+                layer_types = getattr(self.draft_hf_config, "layer_types", None)
+                if layer_types is not None:
+                    has_sliding = any(layer_type == "sliding_attention" for layer_type in layer_types)
+                    has_full = any(layer_type != "sliding_attention" for layer_type in layer_types)
+                    assert not has_sliding, "DFlash sliding attention is not supported yet"
+                    assert not (has_sliding and has_full), "DFlash mixed sliding/full attention is not supported yet"

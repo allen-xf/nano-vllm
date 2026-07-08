@@ -156,6 +156,9 @@ class RowParallelLinear(LinearBase):
     # param = model.get_parameter(weight_name)， size是 linearBase里面的，
     # self.weight = nn.Parameter(torch.empty(output_size, input_size))
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
+        if loaded_weight.dim() == 1:
+            param.data.copy_(loaded_weight)
+            return
         param_data = param.data
         shard_size = param_data.size(self.tp_dim)
         start_idx = self.tp_rank * shard_size
