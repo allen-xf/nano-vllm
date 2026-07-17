@@ -4,10 +4,13 @@ Benchmark speculative decoding on/off.
 Usage:
     python benchmarks/bench_eagle3.py \
         --model /root/llm/model/Qwen3-4B \
-        --draft-model /root/llm/model/Qwen3-4B_eagle3 \
+        --draft-model /root/llm/model/dspark_qwen3_4b_block7 \
+        --spec-method dspark \
         --num-prompts 16 \
         --prompt-len 512 \
         --max-tokens 128 \
+        --prompt-mode  \
+        --temperature 1 \
         --no-chunked-prefill 
 """
 
@@ -53,6 +56,7 @@ class BenchResult:
     prefill_tokens: int
     decode_tokens: int
     scheduler_metrics: dict
+    acceptance_metrics: dict | None
     outputs: list[list[int]]
 
     @property
@@ -87,6 +91,39 @@ def make_text_prompt(index: int, approx_prompt_tokens: int) -> str:
 
 def make_text_prompts(num_prompts: int, approx_prompt_tokens: int) -> list[str]:
     return [make_text_prompt(i, approx_prompt_tokens) for i in range(num_prompts)]
+
+
+HUMANEVAL_PARQUET = "/root/llm/model/humaneval/openai_humaneval/test-00000-of-00001.parquet"
+
+
+def make_humaneval_prompts(num_prompts: int, model_path: str) -> list[str]:
+    import pandas as pd
+    from transformers import AutoTokenizer
+
+    df = pd.read_parquet(HUMANEVAL_PARQUET)
+    raw_prompts = df["prompt"].tolist()
+
+    # DFlash/DSpark drafters are trained on the chat format with thinking disabled.
+    # Feeding raw code-completion text is OOD and collapses acceptance length, so
+    # wrap each HumanEval prompt with the official chat template.
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+    def wrap(p: str) -> str:
+        messages = [{"role": "user", "content": p}]
+        return tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+
+    prompts = [wrap(p) for p in raw_prompts]
+    if num_prompts <= len(prompts):
+        return prompts[:num_prompts]
+    out: list[str] = []
+    while len(out) < num_prompts:
+        out.extend(prompts)
+    return out[:num_prompts]
 
 
 def make_warmup_prompt(args: argparse.Namespace) -> str | list[int]:
@@ -154,12 +191,15 @@ def run_once(
                 max_tokens=args.warmup_tokens,
             )
             llm.generate([make_warmup_prompt(args)], warmup_params, use_tqdm=False)
-            llm.scheduler.reset_metrics()
+
+        llm.scheduler.reset_metrics()
+        if draft_model:
+            llm.model_runner.call("reset_spec_acceptance_metrics")
             if args.spec_profile:
                 llm.model_runner.call("reset_spec_profile_metrics")
 
         sampling_params = [
-            SamplingParams(temperature=0, ignore_eos=True, max_tokens=args.max_tokens)
+            SamplingParams(temperature=args.temperature, ignore_eos=True, max_tokens=args.max_tokens)
             for _ in prompts
         ]
 
@@ -185,6 +225,7 @@ def run_once(
         actual_output_tokens = sum(len(token_ids) for token_ids in output_token_ids)
         target_output_tokens = len(prompts) * args.max_tokens
         scheduler_metrics = llm.scheduler.get_metrics()
+        acceptance_metrics = llm.model_runner.call("get_spec_acceptance_metrics") if draft_model else None
 
         return BenchResult(
             label=label,
@@ -196,25 +237,45 @@ def run_once(
             prefill_tokens=prefill_tokens,
             decode_tokens=decode_tokens,
             scheduler_metrics=scheduler_metrics,
+            acceptance_metrics=acceptance_metrics,
             outputs=output_token_ids,
         )
     finally:
         cleanup_llm(llm)
 
 
-def compare_outputs(baseline: BenchResult, spec: BenchResult, max_tokens: int) -> None:
+def compare_outputs(baseline: BenchResult, spec: BenchResult, max_tokens: int) -> tuple[int, int]:
     mismatches = 0
     length_mismatches = 0
-    for base_ids, spec_ids in zip(baseline.outputs, spec.outputs):
+    first_mismatch = None
+    for prompt_index, (base_ids, spec_ids) in enumerate(zip(baseline.outputs, spec.outputs)):
         if len(base_ids) != len(spec_ids):
             length_mismatches += 1
         if base_ids[:max_tokens] != spec_ids[:max_tokens]:
             mismatches += 1
+            if first_mismatch is None:
+                compare_len = min(max_tokens, max(len(base_ids), len(spec_ids)))
+                for pos in range(compare_len):
+                    base_token = base_ids[pos] if pos < len(base_ids) else None
+                    spec_token = spec_ids[pos] if pos < len(spec_ids) else None
+                    if base_token != spec_token:
+                        first_mismatch = (prompt_index, pos, base_token, spec_token, len(base_ids), len(spec_ids))
+                        break
 
     print("\nOutput check (greedy, compared up to --max-tokens):")
     print(f"  mismatched prompts: {mismatches}/{baseline.num_prompts}")
     if length_mismatches:
         print(f"  length mismatches:  {length_mismatches}/{baseline.num_prompts}")
+    if first_mismatch is not None:
+        prompt_index, pos, base_token, spec_token, base_len, spec_len = first_mismatch
+        print("  first mismatch:")
+        print(f"    prompt index:    {prompt_index}")
+        print(f"    token position:  {pos}")
+        print(f"    baseline token:  {base_token}")
+        print(f"    spec token:      {spec_token}")
+        print(f"    baseline length: {base_len}")
+        print(f"    spec length:     {spec_len}")
+    return mismatches, length_mismatches
 
 
 def print_result(result: BenchResult) -> None:
@@ -235,35 +296,50 @@ def print_result(result: BenchResult) -> None:
         print(f"  pure decode steps:   {metrics['pure_decode_steps']}")
         print(f"  mixed steps:         {metrics['mixed_steps']}")
         print(f"  avg utilization:     {metrics['avg_utilization']}")
+    if result.acceptance_metrics:
+        metrics = result.acceptance_metrics
+        rates = ", ".join(
+            f"k{i + 1}={rate * 100:.1f}%" for i, rate in enumerate(metrics["position_accept_rates"])
+        )
+        print(f"  verify rows:         {metrics['num_rows']}")
+        print(f"  avg accept prefix:   {metrics['avg_accepted_prefix_len']:.2f}")
+        print(f"  accept prefix hist:  {metrics['accepted_prefix_hist']}")
+        print(f"  emitted token hist:  {metrics['emitted_token_hist']}")
+        print(f"  per-position accept: {rates}")
+        print(f"  bonus rate:          {metrics['bonus_rate'] * 100:.1f}%")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compare nano-vLLM performance with spec on/off")
     parser.add_argument("--model", required=True, help="Target model path")
     parser.add_argument("--draft-model", required=True, help="Speculative draft model path")
-    parser.add_argument("--spec-method", choices=["eagle3", "dflash"], default="eagle3",
+    parser.add_argument("--spec-method", choices=["eagle3", "dflash", "dspark"], default="eagle3",
                         help="Speculative backend to benchmark")
     parser.add_argument("--num-prompts", type=int, default=64)
     parser.add_argument("--prompt-len", type=int, default=512)
     parser.add_argument("--max-tokens", type=int, default=128)
+    parser.add_argument("--temperature", type=float, default=0,
+                        help="Sampling temperature for benchmark requests; use 0 for greedy and 1 for unscaled stochastic sampling")
     parser.add_argument("--num-spec-tokens", type=int, default=5)
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--max-num-batched-tokens", type=int, default=16384)
     parser.add_argument("--max-num-seqs", type=int, default=512)
-    parser.add_argument("--prompt-mode", choices=["text", "random-token"], default="text",
-                        help="Use natural text prompts by default; random-token is mostly for stress testing/OOD behavior")
+    parser.add_argument("--prompt-mode", choices=["text", "random-token", "humaneval"], default="text",
+                        help="Use natural text prompts by default; humaneval uses real code-completion prompts; random-token is mostly for stress testing/OOD behavior")
     parser.add_argument("--token-upper", type=int, default=10000, help="Upper bound for random prompt token ids")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--warmup-tokens", type=int, default=8)
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--no-chunked-prefill", dest="enable_chunked_prefill", action="store_false")
     parser.add_argument("--skip-output-check", action="store_true")
+    parser.add_argument("--no-baseline", dest="run_baseline", action="store_false",
+                        help="Skip the spec-off baseline run; only run spec-on")
     parser.add_argument("--spec-profile", action="store_true",
                         help="Enable speculative decoding timing with CUDA synchronizations")
     parser.add_argument("--spec-debug", action="store_true",
                         help="Enable EAGLE3/Qwen3 speculative decoding debug prints")
     parser.add_argument("--verbose", action="store_true", help="Print per-step engine/spec details")
-    parser.set_defaults(enable_chunked_prefill=True)
+    parser.set_defaults(enable_chunked_prefill=True, run_baseline=True)
     args = parser.parse_args()
 
     if args.num_prompts <= 0:
@@ -277,23 +353,33 @@ def main() -> int:
 
     if args.prompt_mode == "random-token":
         prompts = make_random_token_prompts(args.num_prompts, args.prompt_len, args.token_upper, args.seed)
+    elif args.prompt_mode == "humaneval":
+        prompts = make_humaneval_prompts(args.num_prompts, args.model)
     else:
         prompts = make_text_prompts(args.num_prompts, args.prompt_len)
 
     print(f"Prompt mode: {args.prompt_mode}")
+    print(f"Sampling temperature: {args.temperature}")
     if args.prompt_mode == "text":
         print("  using natural text prompts (recommended for spec decoding benchmark)")
+    elif args.prompt_mode == "humaneval":
+        print("  using real HumanEval code-completion prompts (recommended for realistic accept length)")
     else:
         print("  using random token ids (OOD; useful only for stress testing, not spec speedup)")
 
-    baseline = run_once("Baseline (spec off)", args, prompts, draft_model=None)
+    baseline = run_once("Baseline (spec off)", args, prompts, draft_model=None) if args.run_baseline else None
     spec = run_once("Speculative decoding (spec on)", args, prompts, draft_model=args.draft_model)
 
     print("\n" + "=" * 60)
     print("  Summary")
     print("=" * 60)
-    print_result(baseline)
+    if baseline is not None:
+        print_result(baseline)
     print_result(spec)
+
+    if baseline is None:
+        print("\n(baseline skipped: --no-baseline; no speedup/output-check comparison)")
+        return 0
 
     elapsed_speedup = (baseline.elapsed - spec.elapsed) / baseline.elapsed * 100
     tps_speedup = (spec.target_output_tps - baseline.target_output_tps) / baseline.target_output_tps * 100
@@ -302,7 +388,12 @@ def main() -> int:
     print(f"  target tok/s change: {tps_speedup:+.1f}%")
 
     if not args.skip_output_check:
-        compare_outputs(baseline, spec, args.max_tokens)
+        if args.temperature == 0:
+            mismatches, length_mismatches = compare_outputs(baseline, spec, args.max_tokens)
+            if mismatches or length_mismatches:
+                return 1
+        else:
+            print("\nOutput check skipped for stochastic decoding (temperature != 0).")
 
     return 0
 

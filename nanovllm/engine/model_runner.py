@@ -12,7 +12,7 @@ from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
 from nanovllm.engine.block_manager import BlockManager
-from nanovllm.engine.spec_decode import Eagle3SpecBackend, DFlashSpecBackend
+from nanovllm.engine.spec_decode import Eagle3SpecBackend, DFlashSpecBackend, DSparkSpecBackend
 
 
 class ModelRunner:
@@ -45,6 +45,8 @@ class ModelRunner:
                 self.spec_backend = Eagle3SpecBackend(self)
             elif config.spec_method == "dflash":
                 self.spec_backend = DFlashSpecBackend(self)
+            elif config.spec_method == "dspark":
+                self.spec_backend = DSparkSpecBackend(self)
             else:
                 raise ValueError(f"unsupported spec_method: {config.spec_method}")
         self.warmup_model() # 预跑一下模型, 预估得到kv的内存空间
@@ -403,6 +405,12 @@ class ModelRunner:
 
     def reset_spec_profile_metrics(self):
         self.spec_backend.reset_profile_metrics()
+
+    def reset_spec_acceptance_metrics(self):
+        self.spec_backend.reset_acceptance_metrics()
+
+    def get_spec_acceptance_metrics(self):
+        return self.spec_backend.get_acceptance_metrics()
 
     @torch.inference_mode()
     def capture_spec_decode_cudagraph(self):

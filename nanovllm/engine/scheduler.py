@@ -235,6 +235,7 @@ class Scheduler:
         seq.status = SequenceStatus.WAITING
         seq.num_computed_tokens = 0
         seq.prev_draft_tokens = []
+        seq.prev_draft_logits = None
         self.block_manager.deallocate(seq)
         self.waiting.appendleft(seq)
 
@@ -277,6 +278,7 @@ class Scheduler:
                     self.running.remove(seq)
         for seq in decode_seqs:
             seq.prev_draft_tokens = []  # 走了 run() 路径，draft tokens 过时，清空
+            seq.prev_draft_logits = None
             seq.append_token(token_ids[token_idx])
             token_idx += 1
             if (not seq.ignore_eos and token_ids[token_idx - 1] == self.eos) or seq.num_completion_tokens == seq.max_tokens:

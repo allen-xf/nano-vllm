@@ -31,6 +31,7 @@ class Sequence:
         self.ignore_eos = sampling_params.ignore_eos
         # speculative decoding: 上一轮 draft serial 产生的 K 个 token (target vocab)
         self.prev_draft_tokens: list[int] = []
+        self.prev_draft_logits = None
 
     def __len__(self):
         return self.num_tokens

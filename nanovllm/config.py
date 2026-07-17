@@ -20,7 +20,7 @@ class Config:
     num_kvcache_blocks: int = -1 # -1 根据显存动态计算
     # speculative decoding
     draft_model: Optional[str] = None # draft model 路径
-    spec_method: str = "eagle3" # speculative backend: 当前仅支持 eagle3，后续扩展 dflash
+    spec_method: str = "eagle3" # speculative backend: eagle3 / dflash / dspark
     num_spec_tokens: int = 5 # 每步 draft 生成的 token 数 K
     eagle3_fuse_layers: Optional[List[int]] = None # target model 中用于融合的层索引，None 时自动选取
     spec_profile: bool = False # 是否开启 spec 阶段同步计时
@@ -37,9 +37,18 @@ class Config:
         self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)
         # speculative draft model config
         if self.draft_model:
-            assert self.spec_method in {"eagle3", "dflash"}, "spec_method must be 'eagle3' or 'dflash'"
+            assert self.spec_method in {"eagle3", "dflash", "dspark"}, "spec_method must be 'eagle3', 'dflash', or 'dspark'"
             assert os.path.isdir(self.draft_model)
             self.draft_hf_config = AutoConfig.from_pretrained(self.draft_model)
+
+            normalized_dflash_config = dict(getattr(self.draft_hf_config, "dflash_config", None) or {})
+            for key in ("mask_token_id", "target_layer_ids", "layer_ids", "use_aux_hidden_state"):
+                value = getattr(self.draft_hf_config, key, None)
+                if value is not None:
+                    normalized_dflash_config[key] = value
+            if normalized_dflash_config:
+                self.draft_hf_config.dflash_config = normalized_dflash_config
+
             if self.spec_method == "eagle3":
                 # 自动选取融合层：EAGLE3 paper default (layer 2, middle, third-from-last)
                 if self.eagle3_fuse_layers is None:
@@ -51,18 +60,21 @@ class Config:
                         n = self.hf_config.num_hidden_layers
                         self.eagle3_fuse_layers = [2, n // 2, n - 3]
             else:
-                assert getattr(self.hf_config, "model_type", None) == "qwen3", "DFlash currently only supports Qwen3 target models"
-                dflash_config = getattr(self.draft_hf_config, "dflash_config", None)
-                assert dflash_config is not None, "DFlash draft model requires dflash_config"
-                assert dflash_config.get("mask_token_id") is not None, "DFlash requires dflash_config.mask_token_id"
+                method_name = self.spec_method.upper()
+                assert getattr(self.hf_config, "model_type", None) == "qwen3", f"{method_name} currently only supports Qwen3 target models"
+                dflash_config = normalized_dflash_config
+                assert dflash_config, f"{method_name} draft model requires dflash_config"
+                assert dflash_config.get("mask_token_id") is not None, f"{method_name} requires dflash_config.mask_token_id"
                 assert (
                     dflash_config.get("target_layer_ids") is not None
                     or dflash_config.get("layer_ids") is not None
-                ), "DFlash requires dflash_config.target_layer_ids or layer_ids"
-                assert not dflash_config.get("use_swa", False), "DFlash SWA is not supported yet"
+                ), f"{method_name} requires dflash_config.target_layer_ids or layer_ids"
+                if self.spec_method == "dspark":
+                    assert getattr(self.draft_hf_config, "markov_rank", None) is not None, "DSpark requires markov_rank"
+                assert not dflash_config.get("use_swa", False), f"{method_name} SWA is not supported yet"
                 layer_types = getattr(self.draft_hf_config, "layer_types", None)
                 if layer_types is not None:
                     has_sliding = any(layer_type == "sliding_attention" for layer_type in layer_types)
                     has_full = any(layer_type != "sliding_attention" for layer_type in layer_types)
-                    assert not has_sliding, "DFlash sliding attention is not supported yet"
-                    assert not (has_sliding and has_full), "DFlash mixed sliding/full attention is not supported yet"
+                    assert not has_sliding, f"{method_name} sliding attention is not supported yet"
+                    assert not (has_sliding and has_full), f"{method_name} mixed sliding/full attention is not supported yet"

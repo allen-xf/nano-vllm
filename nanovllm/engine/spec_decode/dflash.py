@@ -77,6 +77,7 @@ class DFlashSpecBackend(Eagle3SpecBackend):
         runner.draft_model = self.draft_model
         runner.num_spec_tokens = self.num_spec_tokens
         runner.dflash_target_layer_ids = self.target_layer_ids
+        self.reset_acceptance_metrics()
 
     def _combine_captured_hidden(self, captured: dict[int, torch.Tensor], indices: list[int] | None = None):
         if not self.draft_model.model.use_aux_hidden_state:

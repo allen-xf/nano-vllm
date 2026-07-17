@@ -40,6 +40,8 @@
 - [Q36: Temperature 会影响 Speculative Decoding 的接受率吗？](#q36-temperature-会影响-speculative-decoding-的接受率吗)
 - [Q37: Instruct 模型是什么意思？](#q37-instruct-模型是什么意思)
 - [Q38: 为什么长上下文下普通 drafter 更容易失配？](#q38-为什么长上下文下普通-drafter-更容易失配)
+- [Q39: RoPE 的核心思想，用语言怎么表达？](#q39-rope-的核心思想用语言怎么表达)
+- [Q40: 为什么 MoE 模型上的投机解码效果通常不如 dense 模型明显？](#q40-为什么-moe-模型上的投机解码效果通常不如-dense-模型明显)
 
 ---
 
@@ -2465,6 +2467,20 @@ def capture_cudagraph(self):
 
 CUDA Graph 执行时的中间张量（每层的 hidden_states、qkv 等）需要显存。`pool()` 就是这些中间张量的显存池。所有 Graph 共享同一个 pool，避免每个 Graph 独立分配。
 
+#### capture 后 pool 里的东西还需要吗
+
+要区分 **数值** 和 **显存地址**：
+
+- **录制当时中间张量的具体数值不需要保留**。下次 replay 会重新计算，并覆盖这些位置上的旧值。
+- **但这块显存空间本身必须保留**。因为 CUDA Graph 录下来的不仅是操作顺序，还隐含绑定了这些临时张量使用的内存地址；replay 时仍要在同一批地址上读写。
+
+可以理解成：
+
+- capture：把 forward 用到的“工作台位置”固定下来
+- replay：每次都回到这些固定工作台上干活
+
+所以是 **旧值可以不要，地址不能丢**。只有 Graph 和 pool 一起销毁时，这块显存才能真正释放。
+
 #### `torch.cuda.synchronize()`
 
 等待 GPU 上所有操作完成。因为 GPU 操作是异步的，不等的话可能上一个 Graph 没录完就开始录下一个，多个 Graph 共用 pool 会互相干扰。
@@ -4156,3 +4172,71 @@ Long drafter: 做过长上下文微调后，长 context 下仍能保持较高接
 一句话：
 
 > 长上下文不是让 spec 机制失效，而是让普通 drafter 更不像 target model；长上下文微调的 drafter 能重新拉近二者分布，所以 acceptance length 更高。
+
+---
+
+## Q39: RoPE 的核心思想，用语言怎么表达？
+
+一句话版本：
+
+**RoPE 不是把“位置”当成一段额外信息直接加到 token 表示里，而是让 Q/K 向量随着位置发生旋转；这样 attention 在做点积时，就能自然感知 token 之间的相对位置。**
+
+直觉上可以这样理解：
+
+1. **每个 token 原本先有内容表示**  
+   比如某个词先有它自己的语义向量。
+
+2. **RoPE 不直接给它贴一个绝对位置标签**  
+   它做的是：把向量的每两维看成一个二维平面里的点，然后按位置旋转一个角度。
+
+3. **位置越靠后，旋转角度越大**  
+   不同维度的旋转频率还不同，所以既能表达近距离关系，也能表达远距离关系。
+
+4. **attention 比较的不只是内容，还比较“相位差”**  
+   两个 token 做 attention 时，Q 和 K 的点积会受到它们旋转角度差的影响；而这个角度差正好对应相对位置。
+
+所以它和普通位置编码的区别可以粗略理解成：
+
+- 普通位置编码：给 token 额外加一个“位置标签”
+- RoPE：让 token 的表示坐标系本身按位置旋转
+
+这样做的好处是：
+
+- 位置信息直接进入 attention 的几何结构
+- 模型更自然地利用相对位置信息
+- 对长距离依赖通常更友好
+
+一句话总结：
+
+> RoPE 的本质，是把“位置”编码成向量的旋转相位，让 attention 通过旋转后的 Q/K 点积，自然感知相对位置。
+
+---
+
+## Q40: 为什么 MoE 模型上的投机解码效果通常不如 dense 模型明显？
+
+一句话版本：
+
+**因为 speculative decoding 的收益同时取决于“drafter 和 target 要足够接近”以及“target 验证要足够贵”；而在 MoE 里，这两点通常都更难满足。**
+
+主要有三点：
+
+1. **MoE 的路由是离散的，drafter 更容易和 target 失配**  
+   dense 模型里误差主要体现在连续 hidden state 上；MoE 里除了连续表示，还多了一个 Top-K expert 路由决策。hidden state 只要有一点偏差，就可能让激活的 expert 集合变掉，进而放大输出分布差异。spec 对前缀错误很敏感，所以 acceptance length 往往更短。
+
+2. **MoE 总参数很大，但每个 token 真正激活的参数没那么大**  
+   比如一个 671B 的 MoE 模型，每个 token 也许只激活其中约 37B 的参数。也就是说，target 的实际单 token 成本更接近“激活参数规模”，而不是“总参数规模”。这样一来，target 相对 drafter 的成本优势没有看起来那么夸张，spec 的理论加速空间也会变小。
+
+3. **MoE decode 里还有额外的带宽和通信开销**  
+   target verify 时仍要做 gate、dispatch/combine、读取 expert 权重和 KV cache。即使一次 verify 多个 token，这些访存和 EP 通信开销也不会消失；如果 acceptance length 不够长，节省下来的 target step 很容易被这些固定开销吃掉。
+
+所以更准确地说，不是 **MoE 不能做 speculative decoding**，而是：
+
+- **更容易接受率偏低**
+- **target / drafter 成本比没那么理想**
+- **verify 阶段的通信与带宽瓶颈更难被完全摊薄**
+
+因此在工程上，MoE 上的 spec 往往比 dense 模型更依赖：
+
+- routing 更对齐的 drafter
+- 更长的 acceptance length
+- 更低的 EP 通信和访存开销

@@ -9,10 +9,17 @@ class Sampler(nn.Module):
 
     # logits:batch_size * 词库  temperatures：batch
     def forward(self, logits: torch.Tensor, temperatures: torch.Tensor):
-        # temperature=0 表示 greedy decoding，直接 argmax
-        if (temperatures == 0).all():
+        greedy_mask = temperatures == 0
+        if greedy_mask.all():
             return logits.argmax(dim=-1)
-        return self._sample(logits, temperatures)
+        if not greedy_mask.any():
+            return self._sample(logits, temperatures)
+
+        sample_tokens = torch.empty(logits.size(0), dtype=torch.int64, device=logits.device)
+        sample_tokens[greedy_mask] = logits[greedy_mask].argmax(dim=-1)
+        sample_mask = ~greedy_mask
+        sample_tokens[sample_mask] = self._sample(logits[sample_mask], temperatures[sample_mask])
+        return sample_tokens
 
     @torch.compile
     def _sample(self, logits: torch.Tensor, temperatures: torch.Tensor):

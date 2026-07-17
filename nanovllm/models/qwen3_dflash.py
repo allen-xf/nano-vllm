@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass
 from glob import glob
@@ -17,6 +19,15 @@ from nanovllm.models.qwen3 import Qwen3MLP
 from nanovllm.utils.loader import default_weight_loader
 
 
+def _get_rope_kwargs(config) -> tuple[float, dict | None]:
+    rope_parameters = getattr(config, "rope_parameters", None) or {}
+    rope_theta = rope_parameters.get("rope_theta", getattr(config, "rope_theta", 1000000))
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if rope_scaling is None:
+        rope_scaling = rope_parameters.get("rope_scaling")
+    return rope_theta, rope_scaling
+
+
 class DFlashQwen3Attention(nn.Module):
 
     def __init__(self, config) -> None:
@@ -30,6 +41,7 @@ class DFlashQwen3Attention(nn.Module):
         assert self.total_num_kv_heads % tp_size == 0
         self.num_kv_heads = self.total_num_kv_heads // tp_size
         self.head_dim = getattr(config, "head_dim", self.hidden_size // self.total_num_heads)
+        rope_theta, rope_scaling = _get_rope_kwargs(config)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim ** -0.5
@@ -51,8 +63,8 @@ class DFlashQwen3Attention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=config.max_position_embeddings,
-            base=getattr(config, "rope_theta", 1000000),
-            rope_scaling=getattr(config, "rope_scaling", None),
+            base=rope_theta,
+            rope_scaling=rope_scaling,
         )
         self.attn = Attention(
             self.num_heads,
@@ -194,13 +206,16 @@ class DFlashQwen3ForCausalLM(nn.Module):
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         return self.model(input_ids, positions)
 
-    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        logits = self.lm_head(hidden_states)
+    def map_draft_logits_to_target(self, logits: torch.Tensor) -> torch.Tensor:
         if not self.has_d2t and self.draft_vocab_size == self.target_vocab_size:
             return logits
-        mapped_logits = logits.new_full((logits.shape[0], self.target_vocab_size), float("-inf"))
-        mapped_logits[:, self.d2t] = logits
+        mapped_shape = (*logits.shape[:-1], self.target_vocab_size)
+        mapped_logits = logits.new_full(mapped_shape, float("-inf"))
+        mapped_logits[..., self.d2t] = logits
         return mapped_logits
+
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.map_draft_logits_to_target(self.lm_head(hidden_states))
 
     def combine_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if not self.model.use_aux_hidden_state:

@@ -63,6 +63,7 @@ class Eagle3SpecBackend:
         runner.draft_model = self.draft_model
         runner.eagle3_fuse_layers = self.eagle3_fuse_layers
         runner.num_spec_tokens = self.num_spec_tokens
+        self.reset_acceptance_metrics()
 
     def __getattr__(self, name):
         return getattr(self.runner, name)
@@ -70,6 +71,55 @@ class Eagle3SpecBackend:
     @property
     def block_manager(self):
         return self.runner.block_manager
+
+    def reset_acceptance_metrics(self):
+        self._acceptance_metrics = {
+            "num_rows": 0,
+            "accepted_prefix_hist": [0] * (self.num_spec_tokens + 1),
+            "emitted_token_hist": [0] * (self.num_spec_tokens + 2),
+            "position_accepts": [0] * self.num_spec_tokens,
+            "bonus_accepts": 0,
+        }
+
+    def _record_acceptance_metrics(self, prefix_len: int, emitted_len: int):
+        metrics = self._acceptance_metrics
+        metrics["num_rows"] += 1
+        metrics["accepted_prefix_hist"][prefix_len] += 1
+        metrics["emitted_token_hist"][min(emitted_len, self.num_spec_tokens + 1)] += 1
+        for pos in range(prefix_len):
+            metrics["position_accepts"][pos] += 1
+        if prefix_len == self.num_spec_tokens and emitted_len > self.num_spec_tokens:
+            metrics["bonus_accepts"] += 1
+
+    def get_acceptance_metrics(self) -> dict:
+        if self.rank != 0:
+            return {}
+        metrics = self._acceptance_metrics
+        num_rows = metrics["num_rows"]
+        if num_rows == 0:
+            return {
+                "num_rows": 0,
+                "avg_accepted_prefix_len": 0.0,
+                "accepted_prefix_hist": metrics["accepted_prefix_hist"],
+                "emitted_token_hist": metrics["emitted_token_hist"],
+                "position_accept_rates": [0.0] * self.num_spec_tokens,
+                "bonus_rate": 0.0,
+            }
+        avg_prefix = sum(
+            prefix_len * count
+            for prefix_len, count in enumerate(metrics["accepted_prefix_hist"])
+        ) / num_rows
+        position_accept_rates = [
+            count / num_rows for count in metrics["position_accepts"]
+        ]
+        return {
+            "num_rows": num_rows,
+            "avg_accepted_prefix_len": avg_prefix,
+            "accepted_prefix_hist": metrics["accepted_prefix_hist"],
+            "emitted_token_hist": metrics["emitted_token_hist"],
+            "position_accept_rates": position_accept_rates,
+            "bonus_rate": metrics["bonus_accepts"] / num_rows,
+        }
 
     def _fuse_captured_hidden(self, captured, indices=None):
         if indices is None:
@@ -396,6 +446,7 @@ class Eagle3SpecBackend:
         decode_accepted_tokens = [[] for _ in decode_seqs]
         for row_idx, row in enumerate(decode_rows):
             seq = row["seq"]
+            prefix_len = 0
             if self.rank == 0:
                 target_token_ids = decode_target_token_ids[row_idx]
                 accepted = []
@@ -404,11 +455,137 @@ class Eagle3SpecBackend:
                     draft_tok = seq.prev_draft_tokens[j]
                     if target_pred == draft_tok:
                         accepted.append(draft_tok)
+                        prefix_len += 1
                     else:
                         accepted.append(target_pred)
                         break
                 else:
                     accepted.append(target_token_ids[K])
+                self._record_acceptance_metrics(prefix_len, len(accepted))
+            else:
+                accepted = [0]
+            if self.rank == 0:
+                if not seq.ignore_eos and self.config.eos in accepted:
+                    accepted = accepted[:accepted.index(self.config.eos) + 1]
+                remaining_tokens = seq.max_tokens - seq.num_completion_tokens
+                accepted = accepted[:remaining_tokens]
+            row["accepted_tokens"] = accepted
+            row["num_accepted"] = len(accepted)
+            if self.rank == 0:
+                decode_accepted_tokens[row["decode_index"]] = accepted
+        return decode_accepted_tokens
+
+    def _sample_temp1_token(self, logits: torch.Tensor) -> int:
+        # verify 逐行采样走 eager multinomial，避免调用 @torch.compile 的 sampler
+        # 触发新形状重编译（BackendCompilerFailed）。
+        probs = torch.softmax(logits.float(), dim=-1)
+        return torch.multinomial(probs, num_samples=1).item()
+
+    def _sample_probs_token(self, probs: torch.Tensor) -> int:
+        # probs 已是归一化分布（residual/recovered），直接采样。
+        return torch.multinomial(probs, num_samples=1).item()
+
+    def _verify_temp1_row_delta(self, row_logits: torch.Tensor, draft_tokens: list[int]) -> tuple[list[int], int]:
+        accepted = []
+        prefix_len = 0
+        for j, draft_tok in enumerate(draft_tokens):
+            target_probs = torch.softmax(row_logits[j].float(), dim=-1)
+            if torch.rand((), device=target_probs.device).item() < target_probs[draft_tok].item():
+                accepted.append(draft_tok)
+                prefix_len += 1
+                continue
+
+            recovered_probs = target_probs.clone()
+            recovered_probs[draft_tok] = 0
+            recovered_probs = recovered_probs / recovered_probs.sum()
+            accepted.append(self._sample_probs_token(recovered_probs))
+            break
+        else:
+            accepted.append(self._sample_temp1_token(row_logits[len(draft_tokens)].float()))
+        return accepted, prefix_len
+
+    def _verify_temp1_row_standard(self, row_logits: torch.Tensor, draft_logits: torch.Tensor,
+                                   draft_tokens: list[int]) -> tuple[list[int], int]:
+        accepted = []
+        prefix_len = 0
+        for j, draft_tok in enumerate(draft_tokens):
+            target_probs = torch.softmax(row_logits[j].float(), dim=-1)
+            draft_probs = torch.softmax(draft_logits[j].float(), dim=-1)
+            draft_prob = draft_probs[draft_tok].item()
+            target_prob = target_probs[draft_tok].item()
+            accept_prob = min(1.0, target_prob / max(draft_prob, 1e-12))
+            if torch.rand((), device=target_probs.device).item() < accept_prob:
+                accepted.append(draft_tok)
+                prefix_len += 1
+                continue
+
+            residual_probs = (target_probs - draft_probs).clamp_min_(0)
+            residual_mass = residual_probs.sum()
+            if residual_mass.item() <= 0:
+                accepted.append(self._sample_temp1_token(row_logits[j].float()))
+            else:
+                accepted.append(self._sample_probs_token(residual_probs / residual_mass))
+            break
+        else:
+            accepted.append(self._sample_temp1_token(row_logits[len(draft_tokens)].float()))
+        return accepted, prefix_len
+
+    def _verify_spec_decode_rows(self, decode_seqs: list[Sequence], decode_rows: list[dict],
+                                 logits_selected: torch.Tensor | None,
+                                 draft_target_logits: torch.Tensor | None = None) -> list[list[int]]:
+        if not decode_rows:
+            return [[] for _ in decode_seqs]
+
+        if self.rank == 0:
+            temperatures = self.prepare_sample([row["seq"] for row in decode_rows])
+            if not torch.all((temperatures == 0) | (temperatures == 1)):
+                unsupported = temperatures[(temperatures != 0) & (temperatures != 1)].cpu().tolist()
+                raise NotImplementedError(
+                    f"spec decoding currently supports temperature 0 or 1 only, got {unsupported}"
+                )
+            if (temperatures == 0).all():
+                return self._verify_spec_decode_rows_greedy(decode_seqs, decode_rows, logits_selected)
+
+            decode_logits_start = decode_rows[0]["logit_start"]
+            decode_logits = logits_selected[decode_logits_start:].view(
+                len(decode_rows), self.num_spec_tokens + 1, -1
+            )
+            temperature_values = temperatures.cpu().tolist()
+        else:
+            decode_logits = None
+            temperature_values = None
+
+        K = self.num_spec_tokens
+        decode_accepted_tokens = [[] for _ in decode_seqs]
+        for row_idx, row in enumerate(decode_rows):
+            seq = row["seq"]
+            if self.rank == 0:
+                row_logits = decode_logits[row_idx]
+                temperature = temperature_values[row_idx]
+                if temperature == 0:
+                    target_token_ids = row_logits.argmax(dim=-1).tolist()
+                    accepted = []
+                    prefix_len = 0
+                    for j in range(K):
+                        target_pred = target_token_ids[j]
+                        draft_tok = seq.prev_draft_tokens[j]
+                        if target_pred == draft_tok:
+                            accepted.append(draft_tok)
+                            prefix_len += 1
+                        else:
+                            accepted.append(target_pred)
+                            break
+                    else:
+                        accepted.append(target_token_ids[K])
+                elif draft_target_logits is not None:
+                    accepted, prefix_len = self._verify_temp1_row_standard(
+                        row_logits,
+                        draft_target_logits[row_idx],
+                        seq.prev_draft_tokens,
+                    )
+                else:
+                    accepted, prefix_len = self._verify_temp1_row_delta(row_logits, seq.prev_draft_tokens)
+                self._record_acceptance_metrics(prefix_len, len(accepted))
             else:
                 accepted = [0]
             if self.rank == 0:
@@ -634,7 +811,7 @@ class Eagle3SpecBackend:
 
         finishing_rows, decode_rows, logits_selected = self._select_spec_logits(rows, hidden_out)
         prefill_token_ids = self._sample_spec_prefill_rows(prefill_seqs, finishing_rows, logits_selected)
-        decode_accepted_tokens = self._verify_spec_decode_rows_greedy(decode_seqs, decode_rows, logits_selected)
+        decode_accepted_tokens = self._verify_spec_decode_rows(decode_seqs, decode_rows, logits_selected)
 
         if profile:
             torch.cuda.synchronize()
