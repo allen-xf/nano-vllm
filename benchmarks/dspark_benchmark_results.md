@@ -216,6 +216,43 @@ LIBRARY_PATH=/usr/local/cuda-12.8/targets/x86_64-linux/lib/stubs \
 3. **78/164 mismatch 属正常数值现象**（同上文）：batched verify forward 与 baseline 逐 token forward 的浮点差异在 argmax 平局处触发 tie-break 翻转，128 token 长序列上累积发散；accept 的 token 仍严格等于 target 每步 argmax，无损，不影响 accept 统计。
 4. **代码层已无提升空间**：propose/verify/Markov 链路均正确；`target_layer_ids +1` 经原理（config 声明的是层**输出**，qwen3 capture 的是层**输入**=前一层输出，故 +1 才对齐训练语义）+ A/B 实测（+0=3.53, +1=4.10, +2=3.74）双重确认为最优。
 
+### DFlash K=7 全量 164 条对照（greedy，同口径）
+
+同命令把 draft 换成 `Qwen3-4B-DFlash-b16`、`--spec-method dflash`（K=7, temp=0, 164 条, `--max-num-seqs 32`）：
+
+| 指标 | Baseline (spec off) | Spec (DFlash) |
+|------|--------------------:|--------------:|
+| decode tokens | 20828 | 20828 |
+| **pure decode steps** | **762** | **163** |
+| elapsed | 20.56s | 12.46s |
+
+| 对比 | 值 |
+|------|-----|
+| **step-ratio accept length** | 762 / 163 ≈ **4.67** |
+| **per-row avg accept prefix**（不含 bonus） | **3.46** |
+| **per-row emitted**（含 bonus） | **4.46** |
+| elapsed speedup | **+39.4%** |
+| tok/s change | **+64.9%** |
+| bonus rate | 26.6% |
+| 逐位置接受率 | k1=83.8%, k2=67.6%, k3=54.8%, k4=44.6%, k5=37.6%, k6=31.4%, k7=26.6% |
+| mismatched | 72/164 |
+
+### DSpark vs DFlash 全量 164 汇总
+
+| 全量 164, K=7 | 口径 | DSpark | DFlash |
+|---|---|---|---|
+| greedy(temp=0) | step-ratio accept length | **4.70** | **4.67** |
+| greedy(temp=0) | per-row avg accept prefix | ~3.7 | 3.46 |
+| temp=1.0(128条) | per-row avg accept prefix | **4.34** | 3.18 |
+| temp=1.0(128条) | per-row emitted（含 bonus） | **5.34** | 4.18 |
+
+**关键观察**：
+1. **greedy 全量下两者几乎打平**（4.70 vs 4.67）——greedy exact-match 会把 DSpark 的 Markov 头优势抹平。
+2. **temp=1.0 标准投机采样下 DSpark 明显拉开**（emitted 5.34 vs 4.18）——Markov 顺序头在后段位置持续抬平接受率，在概率采样口径下增益更大。印证「口径对齐」对 accept 对比的决定性影响。
+3. **逐位置曲线**：DFlash 纯并行 base 后段衰减快（k1 83.8% → k7 26.6%），DSpark 靠 Markov 头使后段更平、accept 更长。
+
+> 口径提醒：**step-ratio accept length**（含 bonus）≈ **per-row emitted**（含 bonus），两者都比 **per-row avg accept prefix**（不含 bonus）大 ≈ 1。跨表对比必须同口径，否则会误以为「变低」。
+
 ---
 
 ## temp=1.0 口径复现论文（决定性结论）

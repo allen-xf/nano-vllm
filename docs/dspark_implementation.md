@@ -1220,3 +1220,120 @@ confidence head + calibrated prefix scheduler
 - scheduler 如何在保证 causality 的前提下动态裁剪 verify prefix
 
 这三点会决定最终 throughput 上限。
+
+---
+
+## 20. accept 复现排查方法论（实战沉淀）
+
+> 本节记录一次真实排查：DSpark K=7 在 HumanEval 上一度只有 accept ~3.5–4.7、追不上论文 τ=5.38，最终定位为「backend bug + RoPE 配置读错 + 评测口径不一致」三重问题，修复后在 temperature=1.0 口径下复现 accept length ≈ 5.3（论文 5.38）。以下是可复用的排查思路。
+
+### 20.1 核心原则：先定位「差距轴」，别急着归因
+
+accept 上不去时，永远先问：**是模型问题，还是我这边的问题？** 在证明自己实现正确之前，**不要下「模型本身弱」的结论**——本轮最大的教训就是早期误判「block-diffusion base 先天弱」，实为 backend/config/口径三重问题。
+
+### 20.2 排查顺序（从「最可能自己错」到「确认外部基准」）
+
+**① 权重来源核对（provenance）**
+先确认手上权重是不是论文那个。本轮一度以为是「社区弱权重」，核对官方仓库（DeepSpec Released Checkpoints）后发现就是论文 Table 1 权重 → 差距轴直接从「权重」划掉。
+
+**② 评测口径对齐（最易忽略、收益最大）**
+逐项核对官方 eval 脚本默认参数：
+- `temperature`：论文用 **1.0 标准投机采样**（accept-reject + 残差重采样），我们却用 greedy(temp=0) 严格 exact-match，天然低估 TV-loss 训练的 drafter。**这是本轮 4.7→5.3 的关键。**
+- `max-new-tokens` / `confidence-threshold`（=0 即不启用早停）等，逐个确认是否影响 accept。
+
+**③ backend 提议/verify 路径正确性**
+这类 bug **不报错、greedy 输出仍无损、只悄悄压 accept**，最阴险：
+- 采样位置对齐（`sample_indices` vs query 布局 `[bonus]+mask*(K-1)`）
+- fuse/aux 层 `target_layer_ids` off-by-one
+- **config 字段读取**：如 RoPE base 应从新版 HF `rope_parameters` 读取，而非顶层 `rope_theta`（本轮 accept 5.0↔3.6 的隐形杀手）
+
+**④ 采样/verify 同源性**
+temp=1 verify 复用 propose 阶段缓存的 q（`prev_draft_logits`），避免二次 draft forward 的上下文不一致。
+
+### 20.3 两个关键工具方法
+
+#### A. 确定性 greedy smoke 隔离变量
+
+固定 prompt 的 greedy 是**确定性**的。改动前后跑同一小样本（如 4 prompt），只要 `verify rows` / `accept prefix hist` 变了，就证明该改动**非 no-op**。本轮就是靠它抓到「RoPE 修复被误当作 no-op 删掉」的回归。**清理「看似无用」代码前必做。**
+
+#### B. per-row batch-invariant 指标
+
+**per-row**：verify 每步处理一批序列，每个序列是一个 verify row；对每行独立算 accept prefix 长度，再按行平均：
+```
+avg_accepted_prefix_len = Σ(每行 prefix_len) / 行数
+```
+**batch-invariant（批不变）**：每行的「提议+验证」相互独立，1 条单独跑还是 64 条并发跑，那一行的接受行为一样，所以按行平均**无论怎么批处理都无偏**。
+
+对比反例（**批相关**的旧口径）`accept = decode_tokens / pure_decode_steps / num_seqs`：要求所有序列同波推进，波形错开就失真，必须靠 `--max-num-seqs 1` 强制对齐。per-row 绕开这个问题 → **能并发无偏测量（快 10×+：1.5s vs 28s）**。
+
+### 20.4 逐位置曲线诊断：整体低 vs 后段衰减
+
+看每个位置 k 的接受率 `[k1..kK]`，两种坏形状对应完全不同的问题：
+
+| 形状 | 特征 | 对应问题 | 下一步查什么 |
+|---|---|---|---|
+| **整体低** | **k1 就低**、每位均匀下移（非衰减） | drafter 与 target **根本没对齐**，第一步就错（≈「接线错了」） | RoPE base 读错、`target_layer_ids` off-by-one、`sample_indices` 错位、d2t 词表映射错、未套 chat template |
+| **后段衰减** | k1 正常(90%+) 但越靠后掉越快 | 并行 drafting 的**固有局限**（后位依赖未定前文，误差累积），**未必是 bug**（≈「物理本性」） | 用 base vs base+Markov 分解定性 |
+
+**后段衰减必须用 base vs base+Markov（combined）top1 分解定性：**
+- combined 相对 base 明显抬平（本轮 base 70%→26%、combined 90%→70%）→ **Markov 头正常工作**，衰减是并行 base 本性，无需修。
+- combined ≈ base（加 Markov 后段没改善）→ 才是 **Markov 头失效的 bug**（权重没加载 / bias 没加对 / 未生效）。
+
+### 20.5 案例详解：RoPE base 读错导致 accept 静默下降
+
+本轮「整体低」形态最隐蔽的一个根因，值得单独详解，因为它「不报错、greedy 输出无损、只悄悄压 accept」，极易被误判为模型弱。
+
+#### RoPE 是什么
+
+RoPE（旋转位置编码）通过**按 token 位置旋转 query/key 向量**注入位置信息。旋转角频率由基数 θ（config 里的 `rope_theta`，代码里的 `base`）决定：
+
+```python
+# nanovllm/layers/rotary_embedding.py:29
+inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim, 2) / rotary_dim))
+```
+
+不同维度以不同频率旋转，注意力点积因此能感知**相对位置**。base θ 决定这套频率的「波长谱」：**θ 越大，低频分量越多，可编码的上下文越长**。Qwen3 用 θ=1e6（为长上下文设计），而经典 RoPE 默认是 1e4，两者差 100 倍。
+
+#### 问题根因：transformers 换了 config 格式
+
+本 checkpoint（`dspark_qwen3_4b_block7`）用新版 HF 格式，把 rope 配置放进 `rope_parameters`，**顶层没有 `rope_theta`**：
+
+```python
+# AutoConfig.from_pretrained(...) 实测：
+rope_parameters = {'rope_theta': 1000000, 'rope_type': 'default'}
+# 旧代码 getattr(config, 'rope_theta', 1000000)  -> 10000.0  ❌（HF 类默认值，不是我们的兜底 1e6）
+# 新代码 从 rope_parameters 读               -> 1000000  ✅
+```
+
+关键陷阱：`getattr(config, "rope_theta", 1000000)` 的兜底默认值**永远不会触发**，因为 HF 的 config 对象**存在** `rope_theta` 属性、只是值是遗留默认 **10000.0**（不是 checkpoint 真实的 1e6）。
+
+#### 为什么 base 错 → accept 掉
+
+base 从 1e6 被读成 1e4（差 100 倍）→ `inv_freq` 全错 → 每个维度的旋转角都不对 → **draft 模型的注意力对位置的感知彻底错位** → draft 隐状态劣化 → 提议 token 质量下降。实测 greedy 4-prompt smoke：**accept 5.0 → 3.64**。
+
+#### 为什么「不报错、greedy 无损、只压 accept」
+
+- θ=1e4 仍是合法数值，前向照跑、**不崩溃**；
+- 出错的只是 **draft 模型**（`qwen3_dflash.py` 的 attention）；**target 模型走自己正确的 rope**，所以 verify 仍按 target argmax 接受，**最终输出无损正确**；
+- 后果只体现在 draft 质量下降 → accept 掉。这正是 20.4 节的**「整体低」**形态（k1 就塌），典型「接线错了」。
+
+#### 修复
+
+`qwen3_dflash.py` 用 `_get_rope_kwargs(config)` **优先从 `rope_parameters` 读** `rope_theta`/`rope_scaling`，读不到再回落顶层字段：
+
+```python
+def _get_rope_kwargs(config) -> tuple[float, dict | None]:
+    rope_parameters = getattr(config, "rope_parameters", None) or {}
+    rope_theta = rope_parameters.get("rope_theta", getattr(config, "rope_theta", 1000000))
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if rope_scaling is None:
+        rope_scaling = rope_parameters.get("rope_scaling")
+    return rope_theta, rope_scaling
+```
+
+**通用教训**：加载新版 HF checkpoint 时，凡是位置编码/缩放类超参（`rope_theta`、`rope_scaling` 等），都要优先从 `rope_parameters` 读；直接 `getattr(config, "rope_theta", ...)` 会拿到遗留默认值而非真实值，且兜底默认永不触发。
+
+### 20.6 一句话总结
+
+> **口径对齐 > backend 正确性 > 组件调优**；每一步都用「确定性 smoke + 逐位置指标」量化验证，**先证明自己对，再谈模型强弱**。
+> 诊断口诀：**k1 低 → 查对齐/配置；k1 高但尾部塌 → 查 Markov 分解决定是本性还是 bug。**
